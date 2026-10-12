@@ -4,6 +4,23 @@ All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0.0, tool schemas and
 result shapes may change in a minor or patch release; each such change is listed below.
 
+## [0.5.1] - 2026-10-12
+
+Listed in the official MCP Registry. No tool was added, removed, or changed in schema or result
+shape; the server still registers 29 tools.
+
+### Added
+
+- **An MCP Registry entry.** The server is published to
+  [registry.modelcontextprotocol.io](https://registry.modelcontextprotocol.io) as
+  `io.github.mhmdaskari/overleaf-web-mcp`, which the MCP clients and directories that read the
+  registry use to find and install it. `server.json` in the repository root describes the npm
+  package, its `serve` argument, and the optional environment variables, and `package.json`
+  carries the matching `mcpName` the registry checks against the published package.
+- The `Publish to npm` workflow lists each release in the registry once the package is on npm,
+  signing in with GitHub OIDC, so no registry token is stored. A test keeps `server.json`'s name
+  and versions aligned with `package.json`.
+
 ## [0.5.0] - 2026-10-10
 
 Shared core and safety. Every operation is now defined once, in an operation registry the MCP
