@@ -1,0 +1,65 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.mhmdaskari/overleaf-web-mcp",
+  "title": "Overleaf Web MCP",
+  "description": "Read, edit, compile, and review Overleaf projects through your own signed-in web session.",
+  "repository": {
+    "url": "https://github.com/mhmdaskari/overleaf-web-mcp",
+    "source": "github",
+    "id": "1301032065"
+  },
+  "websiteUrl": "https://mhmdaskari.github.io/overleaf-web-mcp/",
+  "version": "0.5.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "overleaf-web-mcp",
+      "version": "0.5.0",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "serve",
+          "description": "Run the MCP server over stdio. Sign in once first with `npx overleaf-web-mcp login`."
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "OVERLEAF_BASE_URL",
+          "description": "Overleaf origin to use, for a self-hosted instance. Use the same value for login and serve.",
+          "default": "https://www.overleaf.com",
+          "format": "string"
+        },
+        {
+          "name": "OVERLEAF_COOKIE_JAR_FILE",
+          "description": "Where the saved session is read from, if not the platform configuration directory.",
+          "format": "filepath"
+        },
+        {
+          "name": "OVERLEAF_ALLOWED_PROJECTS",
+          "description": "Comma-separated project ids the server may touch. Unset allows every project.",
+          "format": "string"
+        },
+        {
+          "name": "OVERLEAF_LOCAL_READ_ROOTS",
+          "description": "Absolute folders local reads must stay inside, separated by : (; on Windows). Unset allows any.",
+          "format": "string"
+        },
+        {
+          "name": "OVERLEAF_LOCAL_WRITE_ROOTS",
+          "description": "Absolute folders local writes must stay inside, separated by : (; on Windows). Unset allows any.",
+          "format": "string"
+        },
+        {
+          "name": "OVERLEAF_ALLOWED_EFFECTS",
+          "description": "Comma-separated kinds of change operations may make, such as overleaf-read. Unset allows all.",
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}

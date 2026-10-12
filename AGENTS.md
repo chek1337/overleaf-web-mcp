@@ -97,13 +97,14 @@ CI runs all of these on Node 20 and 24 for every push and pull request. For the 
 ## Releasing
 
 1. Update `CHANGELOG.md`. Set the same version in `package.json` (and `package-lock.json`, for
-   example with `npm version X.Y.Z --no-git-tag-version`) and `SERVER_VERSION` in
-   `src/version.ts`.
+   example with `npm version X.Y.Z --no-git-tag-version`), `SERVER_VERSION` in
+   `src/version.ts`, and both `version` fields of `server.json`.
 2. Merge to `main` with CI green.
 3. Run the `Publish to npm` workflow on `main` with the version (`workflow_dispatch`). It checks
    that the version matches `package.json` and has a `CHANGELOG.md` section, re-runs the checks,
-   publishes to npm with trusted publishing, then creates the `vX.Y.Z` tag and the GitHub Release
-   with that section as its notes. Publishing a GitHub Release with tag `vX.Y.Z` by hand still
+   publishes to npm with trusted publishing, lists the version in the MCP Registry from
+   `server.json` with GitHub OIDC, then creates the `vX.Y.Z` tag and the GitHub Release with that
+   section as its notes. Publishing a GitHub Release with tag `vX.Y.Z` by hand still
    works and runs the same checks and publish.
 4. The docs site redeploys on its own from `main`.
 
