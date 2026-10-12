@@ -100,8 +100,8 @@ node scripts/npm-downloads.ts /tmp/npm-downloads.json   # Node 22.18 or newer ru
 ## Releasing
 
 1. Update `CHANGELOG.md`. Set the same version in `package.json` and `package-lock.json`, for
-   example with `npm version X.Y.Z --no-git-tag-version`, and in `SERVER_VERSION` in
-   `src/version.ts`.
+   example with `npm version X.Y.Z --no-git-tag-version`, in `SERVER_VERSION` in
+   `src/version.ts`, and in both `version` fields of `server.json`.
 2. Merge to `main` with CI green.
 3. Publish, in either of two ways. Both run the `Publish to npm` workflow, which checks that the
    tag equals the package version and that `CHANGELOG.md` has a section for it, re-runs check,
@@ -114,8 +114,12 @@ node scripts/npm-downloads.ts /tmp/npm-downloads.json   # Node 22.18 or newer ru
     - **From a GitHub Release:** create a Release with tag `vX.Y.Z` yourself; publishing it starts
       the workflow on that tag.
 
-    Re-running a publish that already reached npm skips the upload, so a run that failed after
-    publishing can be re-run to create the missing release.
+    Once the package is on npm, the workflow also publishes `server.json` to the
+    [MCP Registry](https://registry.modelcontextprotocol.io), signing in with GitHub OIDC.
+
+    Re-running a publish that already reached npm skips the upload, and one already in the MCP
+    Registry skips that too, so a run that failed after publishing can be re-run to create
+    whatever is missing.
 
 ## For coding agents
 

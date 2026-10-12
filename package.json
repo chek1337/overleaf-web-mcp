@@ -1,6 +1,7 @@
 {
   "name": "overleaf-web-mcp",
-  "version": "0.5.0",
+  "version": "0.5.1",
+  "mcpName": "io.github.mhmdaskari/overleaf-web-mcp",
   "description": "Unofficial MCP server for browsing, tracked writing, organizing, syncing local folders, compiling, reviewing, and monitoring version history in Overleaf projects through an authenticated web session.",
   "author": "Mohammad Askari",
   "license": "MIT",
@@ -76,6 +77,7 @@
   },
   "keywords": [
     "mcp",
+    "mcp-server",
     "model-context-protocol",
     "overleaf",
     "latex",
