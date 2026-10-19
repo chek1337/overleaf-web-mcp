@@ -32,7 +32,13 @@ function fakeRuntime() {
       getSectionContent: vi.fn(),
       writeSection: vi.fn(),
     },
-    compile: { compileProject: vi.fn(), stopCompile: vi.fn() },
+    compile: {
+      compileProject: vi.fn(),
+      stopCompile: vi.fn(),
+      getCompileLog: vi.fn(),
+      downloadCompileOutput: vi.fn(),
+      readCompileOutput: vi.fn(),
+    },
     comments: {
       listComments: vi.fn(),
       replyToComment: vi.fn(),
@@ -491,14 +497,13 @@ describe('MCP tool registration', () => {
     const batch = registered.get('batch_upload')!
     expect(batch.config.annotations).toEqual({ destructiveHint: true, idempotentHint: false })
     expect(batch.config.outputSchema).toBeDefined()
-    for (const term of ['destinationPath', 'onConflict', 'skip', 'overwrite', 'write_file', 'stopOnError', 'never resubmitted', 'OUTCOME_UNKNOWN']) {
+    for (const term of ['destinationPath', 'onConflict', 'fail', 'skip', 'overwrite', 'write_file', 'stopOnError', 'never resubmitted', 'OUTCOME_UNKNOWN']) {
       expect(batch.config.description).toContain(term)
     }
     const input = batch.config.inputSchema as { parse: (value: unknown) => Record<string, unknown> }
-    // onConflict has no schema default, so an omitted value (deprecated) stays distinct from an explicit one.
+    // No default replaces anything: omitted, a taken destination refuses the call.
     const parsed = input.parse({ projectId: 'p', files: [{ localPath: '/a.png', destinationPath: 'a.png' }] })
-    expect(parsed).toMatchObject({ stopOnError: false })
-    expect(parsed).not.toHaveProperty('onConflict')
+    expect(parsed).toMatchObject({ stopOnError: false, onConflict: 'fail' })
     expect(() => input.parse({ projectId: 'p', files: [] })).toThrow()
 
     const zip = registered.get('download_project_zip')!

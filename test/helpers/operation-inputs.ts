@@ -28,6 +28,8 @@ export const INPUTS: Record<OperationName, Record<string, unknown>> = {
   write_section: { projectId: 'p', filePath: 'main.tex', revision: 'r', sectionId: 's', content: 'x' },
   compile_project: { projectId: 'p' },
   stop_compile: { projectId: 'p' },
+  get_compile_log: { projectId: 'p' },
+  download_compile_output: { projectId: 'p', localPath: '/tmp/paper.pdf' },
   list_comments: { projectId: 'p' },
   reply_to_comment: { projectId: 'p', threadId: 't', content: 'Thanks' },
   add_comment: {

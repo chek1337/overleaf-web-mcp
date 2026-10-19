@@ -45,7 +45,7 @@ describe('local roots through the real runtime', () => {
           ['batch_upload', { projectId: 'p', files: [{ localPath: join(folder, 'figure.png'), destinationPath: 'f.png' }] }],
           ['import_project_zip', { localZipPath: join(folder, 'paper.zip') }],
           ['plan_sync', { projectId: 'p', localFolderPath: folder }],
-          ['sync_directory', { projectId: 'p', localFolderPath: folder, mode: 'additive' }],
+          ['sync_directory', { projectId: 'p', localFolderPath: folder, mode: 'additive', unplanned: true }],
         ]
         for (const [name, input] of calls) {
           await expect(service[name](input), `${name} from ${folder}`).rejects.toMatchObject({

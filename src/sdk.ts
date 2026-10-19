@@ -1,7 +1,7 @@
 /**
  * `overleaf-web-mcp/core`: the operations behind the MCP server, without MCP. It never loads the
- * MCP SDK. During v0.5.0 it exposes the same service as the MCP server, safety defaults and their
- * deprecations included; v0.7.0 documents which parts are stable and adds a client facade.
+ * MCP SDK. It exposes the same service as the MCP server, with the same safety defaults; v0.7.0
+ * documents which parts are stable and adds a client facade.
  *
  * ```ts
  * import { createOverleafService, OverleafRuntime, readConfig } from 'overleaf-web-mcp/core'

@@ -199,9 +199,27 @@ export function createOverleafService(runtime: OverleafServiceRuntime): Overleaf
       )
     ),
     compile_project: operation('compile_project', async input =>
-      await runtime.compile.compileProject(input.projectId, input.rootFilePath, input.timeoutMs)
+      await runtime.compile.compileProject(input.projectId, input.rootFilePath, input.timeoutMs, {
+        stopOnFirstError: input.stopOnFirstError,
+        draft: input.draft,
+      })
     ),
     stop_compile: operation('stop_compile', async input => await runtime.compile.stopCompile(input.projectId)),
+    get_compile_log: operation('get_compile_log', async input =>
+      await runtime.compile.getCompileLog(input.projectId, {
+        buildRef: input.buildRef,
+        kind: input.kind,
+        format: input.format,
+        tail: input.tail,
+      })
+    ),
+    download_compile_output: operation('download_compile_output', async input =>
+      await runtime.compile.downloadCompileOutput(input.projectId, input.localPath, {
+        file: input.file,
+        buildRef: input.buildRef,
+        overwrite: input.overwrite,
+      })
+    ),
     list_comments: operation('list_comments', async input =>
       await runtime.comments.listComments(input.projectId, {
         ...(input.status === undefined ? {} : { status: input.status }),

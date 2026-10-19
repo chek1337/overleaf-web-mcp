@@ -4,6 +4,7 @@ import { Client, InMemoryTransport } from '@modelcontextprotocol/client'
 import { McpServer, type ServerContext } from '@modelcontextprotocol/server'
 import { describe, expect, test, vi } from 'vitest'
 
+import { McpError } from '../src/core/errors.js'
 import { SERVER_INSTRUCTIONS } from '../src/mcp/instructions.js'
 import { ToolActivity, TOOL_NAMES, type ToolCallExtra } from '../src/mcp/tools.js'
 import { createMcpServer, runStdioServer, SERVER_NAME, serveOverStdio } from '../src/server.js'
@@ -33,7 +34,13 @@ function fakeRuntime() {
       getSectionContent: vi.fn(),
       writeSection: vi.fn(),
     },
-    compile: { compileProject: vi.fn(), stopCompile: vi.fn() },
+    compile: {
+      compileProject: vi.fn(),
+      stopCompile: vi.fn(),
+      getCompileLog: vi.fn(),
+      downloadCompileOutput: vi.fn(),
+      readCompileOutput: vi.fn(),
+    },
     comments: {
       listComments: vi.fn(),
       replyToComment: vi.fn(),
@@ -97,6 +104,37 @@ describe('MCP server', () => {
     // Parameter descriptions survive the schema conversion the SDK performs.
     expect(result.tools.find(tool => tool.name === 'list_projects')?.inputSchema.properties?.query)
       .toMatchObject({ description: 'Case-insensitive substring of the project name' })
+    await client.close()
+    await server.close()
+  })
+
+  test('serves the latest build\'s log and PDF as read-only resources', async () => {
+    const runtime = fakeRuntime()
+    runtime.compile.readCompileOutput.mockImplementation(async (_projectId: string, file: string) => ({
+      bytes: new TextEncoder().encode(file === 'output.pdf' ? '%PDF-1.5' : 'This is pdfTeX'),
+      truncated: false,
+      buildId: 'b',
+    }))
+    const server = createMcpServer(runtime)
+    const client = new Client({ name: 'smoke-client', version: '1.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
+
+    const { resourceTemplates } = await client.listResourceTemplates()
+    expect(resourceTemplates.map(template => template.uriTemplate)).toEqual([
+      'overleaf://project/{projectId}/output/output.log',
+      'overleaf://project/{projectId}/output/output.pdf',
+    ])
+    const log = await client.readResource({ uri: 'overleaf://project/abc/output/output.log' })
+    expect(log.contents).toEqual([
+      { uri: 'overleaf://project/abc/output/output.log', mimeType: 'text/plain', text: 'This is pdfTeX' },
+    ])
+    const pdf = await client.readResource({ uri: 'overleaf://project/abc/output/output.pdf' })
+    expect(Buffer.from((pdf.contents[0] as { blob: string }).blob, 'base64').toString()).toBe('%PDF-1.5')
+    expect(runtime.compile.readCompileOutput).toHaveBeenCalledWith('abc', 'output.pdf', 16 * 1024 * 1024)
+
+    runtime.compile.readCompileOutput.mockRejectedValueOnce(new McpError('NO_BUILD', 'No compile yet.'))
+    await expect(client.readResource({ uri: 'overleaf://project/abc/output/output.log' })).rejects.toThrow(/NO_BUILD/u)
     await client.close()
     await server.close()
   })

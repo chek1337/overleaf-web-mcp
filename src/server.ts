@@ -1,9 +1,10 @@
 import type { Readable, Writable } from 'node:stream'
 
-import { McpServer, type Transport } from '@modelcontextprotocol/server'
+import { McpServer, ResourceTemplate, type Transport } from '@modelcontextprotocol/server'
 import { serveStdio, StdioServerTransport } from '@modelcontextprotocol/server/stdio'
 
 import { SERVER_INSTRUCTIONS } from './mcp/instructions.js'
+import { registerCompileResources, type ResourceRegistrar } from './mcp/resources.js'
 import type { OverleafServiceRuntime } from './contracts/service.js'
 import { registerOverleafTools, ToolActivity, type ToolRegistrationOptions } from './mcp/tools.js'
 import { SERVER_NAME, SERVER_VERSION } from './version.js'
@@ -37,6 +38,11 @@ export function createMcpServer(
     runtime,
     activity,
     options
+  )
+  registerCompileResources(
+    server as unknown as ResourceRegistrar,
+    runtime,
+    uriTemplate => new ResourceTemplate(uriTemplate, { list: undefined })
   )
   return server
 }

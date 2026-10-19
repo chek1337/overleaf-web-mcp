@@ -175,6 +175,12 @@ class FakeProject {
         if (options?.overwrite === false && existing !== undefined && existing.type !== 'folder') {
           throw new McpError('CONFIRMATION_MISMATCH', `${path} already exists and overwrite is false.`)
         }
+        if (existing?.type === 'doc' && options?.uncheckedDocumentReplace !== true) {
+          throw new McpError('INVALID_ARGUMENT', `${path} is a text document; pass uncheckedDocumentReplace.`)
+        }
+        if (existing?.type === 'file' && options?.overwrite !== true && options?.expectedHash === undefined) {
+          throw new McpError('CONFIRMATION_MISMATCH', `${path} already exists; pass overwrite.`)
+        }
         if (this.failUploads.has(path)) throw new McpError('REMOTE_ERROR', 'Overleaf returned HTTP 500.')
         if (this.rateLimitUploads.has(path)) {
           throw new McpError('RATE_LIMITED', 'Overleaf rate-limited this request. Wait before retrying.', { retryable: true })
@@ -199,16 +205,12 @@ class FakeProject {
         }
         this.afterUpload?.(path)
         const entity = this.entities.get(path)
-        const documentReplaced = existing?.type === 'doc' && options?.uncheckedDocumentReplace !== true
         return {
           ...(entity === undefined || entity.type === 'folder' ? {} : { entityId: entity.id, entityType: entity.type }),
           path,
           replaced: existing !== undefined,
           trackChangesActive: false,
           writeMode: 'untracked' as const,
-          ...(documentReplaced
-            ? { deprecations: [{ parameter: 'uncheckedDocumentReplace', message: 'blind', enforcedIn: '0.6.0' }] }
-            : {}),
         }
       },
       manageEntity: async (_projectId, action: EntityAction) => {
@@ -752,27 +754,30 @@ describe('sync_directory', () => {
   })
 })
 
-describe('sync_directory without a plan (deprecated, refused from 0.6.0)', () => {
-  test('still runs tokenless, reporting planned: false and a deprecation; unplanned says it is on purpose', async () => {
-    const project = new FakeProject({})
+describe('sync_directory without a plan', () => {
+  test('is refused before anything is read unless an additive sync passes unplanned', async () => {
+    const project = new FakeProject({ 'a.tex': 'a\n' })
     const root = await localFolder({ 'a.png': png(1) })
     const api = new SyncApi(project.deps())
 
-    const tokenless = await api.syncDirectory(PROJECT, root, { mode: 'additive' })
-    expect(tokenless).toMatchObject({
-      status: 'complete',
-      planned: false,
-      deprecations: [{ parameter: 'planToken', enforcedIn: '0.6.0', message: expect.stringContaining('unplanned') }],
-    })
+    for (const options of [{ mode: 'additive' as const }, { mode: 'mirror' as const, confirmDeleteCount: 1 }]) {
+      await expect(api.syncDirectory(PROJECT, root, options)).rejects.toMatchObject({
+        code: 'CONFIRMATION_MISMATCH',
+        details: { missing: 'planToken' },
+      })
+    }
+    expect(project.treeReads).toBe(0)
+    expect(project.documentReads).toBe(0)
+    expect(project.mutations).toEqual([])
 
     const unplanned = await api.syncDirectory(PROJECT, root, { mode: 'additive', unplanned: true })
-    expect(unplanned.planned).toBe(false)
-    expect(unplanned).not.toHaveProperty('deprecations')
+    expect(unplanned).toMatchObject({ status: 'complete', planned: false })
+    expect(project.mutations).toEqual(['upload a.png'])
+    expect(project.entities.has('a.tex')).toBe(true)
 
     const plan = await api.planSync(PROJECT, root)
     const planned = await api.syncDirectory(PROJECT, root, { mode: 'additive', planToken: plan.planToken })
     expect(planned.planned).toBe(true)
-    expect(planned).not.toHaveProperty('deprecations')
   })
 
   test('refuses unplanned with a planToken or in mirror mode before reading anything', async () => {
@@ -823,8 +828,25 @@ describe('sync_directory without a plan (deprecated, refused from 0.6.0)', () =>
   })
 })
 
-describe('batch_upload during the transition', () => {
-  test('an explicit onConflict replaces binaries silently and reports documents replaced without opting in', async () => {
+describe('batch_upload replacements', () => {
+  test('onConflict defaults to fail: a taken destination refuses the call before any upload', async () => {
+    const project = new FakeProject({ 'main.tex': 'old\n', 'fig.png': png(1) })
+    const root = await localFolder({ 'main.tex': 'new\n', 'fig.png': png(2), 'new.png': png(3) })
+    const files = ['new.png', 'fig.png', 'main.tex'].map(name => ({ localPath: join(root, name), destinationPath: name }))
+    const api = new SyncApi(project.deps())
+
+    await expect(api.batchUpload(PROJECT, files)).rejects.toMatchObject({
+      code: 'CONFIRMATION_MISMATCH',
+      details: { missing: 'onConflict', count: 2, paths: ['fig.png', 'main.tex'] },
+    })
+    expect(project.mutations).toEqual([])
+
+    // Nothing taken, nothing to confirm.
+    const fresh = await api.batchUpload(PROJECT, files.slice(0, 1))
+    expect(fresh).toMatchObject({ status: 'complete', onConflict: 'fail' })
+  })
+
+  test('overwrite replaces binaries, and a document only with uncheckedDocumentReplace, per file', async () => {
     const project = new FakeProject({ 'main.tex': 'old\n', 'fig.png': png(1) })
     const root = await localFolder({ 'main.tex': 'new\n', 'fig.png': png(2) })
     const files = [
@@ -833,31 +855,29 @@ describe('batch_upload during the transition', () => {
     ]
     const api = new SyncApi(project.deps())
 
-    const binaryOnly = await api.batchUpload(PROJECT, files.slice(0, 1), { onConflict: 'overwrite' })
-    expect(binaryOnly).not.toHaveProperty('deprecations')
-
     const withDocument = await api.batchUpload(PROJECT, files, { onConflict: 'overwrite' })
-    expect(withDocument.deprecations?.map(entry => entry.parameter)).toEqual(['uncheckedDocumentReplace'])
+    expect(withDocument.status).toBe('partial')
+    expect(withDocument.completed).toEqual([expect.objectContaining({ destinationPath: 'fig.png', replaced: true })])
+    expect(withDocument.failed).toEqual([expect.objectContaining({ destinationPath: 'main.tex', errorCode: 'INVALID_ARGUMENT' })])
+    expect(project.mutations).toEqual(['upload fig.png'])
 
     const optedIn = await api.batchUpload(PROJECT, files, { onConflict: 'overwrite', uncheckedDocumentReplace: true })
-    expect(optedIn).not.toHaveProperty('deprecations')
-
-    const defaulted = await api.batchUpload(PROJECT, files)
-    expect(defaulted.deprecations?.map(entry => entry.parameter)).toEqual(['onConflict', 'uncheckedDocumentReplace'])
-    expect(defaulted.status).toBe('complete')
+    expect(optedIn.status).toBe('complete')
+    expect(project.mutations).toEqual(['upload fig.png', 'upload fig.png', 'upload main.tex'])
   })
 
-  test('counts a replacement recovered after a timeout as relying on the default', async () => {
+  test('a replacement recovered after a timeout is reported as replaced', async () => {
     const project = new FakeProject({ 'fig.png': png(1) })
     const root = await localFolder({ 'fig.png': png(2) })
     project.timeoutUploads.set('fig.png', 'landed')
 
-    const result = await new SyncApi(project.deps()).batchUpload(PROJECT, [
-      { localPath: join(root, 'fig.png'), destinationPath: 'fig.png' },
-    ])
+    const result = await new SyncApi(project.deps()).batchUpload(
+      PROJECT,
+      [{ localPath: join(root, 'fig.png'), destinationPath: 'fig.png' }],
+      { onConflict: 'overwrite' }
+    )
 
     expect(result.completed).toEqual([expect.objectContaining({ destinationPath: 'fig.png', recoveredAfterTimeout: true, replaced: true })])
-    expect(result.deprecations?.map(entry => entry.parameter)).toEqual(['onConflict'])
   })
 })
 
@@ -938,7 +958,7 @@ describe('batch_upload', () => {
       { localPath: join(root, 'a.png'), destinationPath: 'figures/old.png' },
       { localPath: join(root, 'b.png'), destinationPath: 'figures/deep/er/b.png' },
       { localPath: join(root, 'c.png'), destinationPath: 'c.png' },
-    ])
+    ], { onConflict: 'overwrite' })
 
     expect(project.mutations).toEqual([
       'upload figures/old.png',
@@ -961,8 +981,6 @@ describe('batch_upload', () => {
       failed: [],
       remaining: [],
       verified: true,
-      // The replacement relied on onConflict's default, which 0.6.0 removes.
-      deprecations: [{ parameter: 'onConflict', message: expect.stringContaining('0.6.0'), enforcedIn: '0.6.0' }],
     })
     expect(project.entities.get('figures/old.png')).toMatchObject({ id: oldId, hash: gitBlobHash(png(2)) })
   })
@@ -1164,7 +1182,8 @@ describe('batch_upload', () => {
 
     const result = await new SyncApi(project.deps()).batchUpload(
       PROJECT,
-      ['landed.png', 'lost.png', 'notes.tex', 'same.png'].map(name => ({ localPath: join(root, name), destinationPath: name }))
+      ['landed.png', 'lost.png', 'notes.tex', 'same.png'].map(name => ({ localPath: join(root, name), destinationPath: name })),
+      { onConflict: 'overwrite' }
     )
 
     expect(project.mutations).toEqual(['upload landed.png', 'upload lost.png', 'upload notes.tex', 'upload same.png'])

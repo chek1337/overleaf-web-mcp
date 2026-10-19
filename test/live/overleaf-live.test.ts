@@ -151,10 +151,33 @@ describe.skipIf(!enabled || process.env.RUN_OVERLEAF_LIVE_LIFECYCLE_TESTS !== '1
           rootFilePath: 'paper.tex',
         })
         expect(settings.rootDocPath).toBe('paper.tex')
-        await expect(runtime.compile.compileProject(created.projectId)).resolves.toMatchObject({
-          status: 'success',
-          rootFilePath: 'paper.tex',
-        })
+        const compiled = await runtime.compile.compileProject(created.projectId)
+        expect(compiled).toMatchObject({ status: 'success', rootFilePath: 'paper.tex' })
+        expect(compiled.summary).toMatchObject({ builtCleanly: true, errorCount: 0, pageCount: 1 })
+        const output = await mkdtemp(join(tmpdir(), 'overleaf-live-compile-'))
+        try {
+          const pdf = await runtime.compile.downloadCompileOutput(created.projectId, join(output, 'paper.pdf'))
+          expect(pdf.sizeBytes).toBeGreaterThan(0)
+          expect((await readFile(pdf.localPath)).subarray(0, 5).toString('latin1')).toBe('%PDF-')
+          const log = await runtime.compile.getCompileLog(created.projectId, { buildRef: compiled.buildRef, tail: 5 })
+          expect(log.errorLines).toEqual([])
+        } finally {
+          await rm(output, { recursive: true })
+        }
+
+        // A deliberate undefined command still yields a PDF and status success, but not a clean build.
+        await runtime.createFile(
+          created.projectId,
+          'broken.tex',
+          '\\documentclass{article}\n\\begin{document}\n\\undefinedcommand\n\\end{document}\n'
+        )
+        // Overleaf refuses a compile within a second of the last one.
+        await new Promise(resolve => setTimeout(resolve, 1_500))
+        const broken = await runtime.compile.compileProject(created.projectId, 'broken.tex')
+        expect(broken.status).toBe('success')
+        expect(broken.summary.builtCleanly).toBe(false)
+        expect(broken.summary.errorCount).toBeGreaterThanOrEqual(1)
+        expect(broken.summary.errors[0]).toMatchObject({ file: 'broken.tex', line: 3 })
       } finally {
         // Trash, never delete: a failed assertion must leave something a human can inspect.
         await runtime.projects.manageProject(created.projectId, { action: 'trash', confirmName: name })
@@ -228,6 +251,10 @@ describe.skipIf(!enabled || process.env.RUN_OVERLEAF_LIVE_SYNC_TESTS !== '1')(
         ]
         const uploaded = await runtime.sync.batchUpload(created.projectId, files)
         expect(uploaded).toMatchObject({ status: 'complete', verified: true, failed: [] })
+        // A second batch onto the same paths is refused unless onConflict says what to do.
+        await expect(runtime.sync.batchUpload(created.projectId, files)).rejects.toMatchObject({
+          code: 'CONFIRMATION_MISMATCH',
+        })
         expect(uploaded.completed.map(entry => entry.destinationPath)).toEqual([
           'figures',
           'figures/new',

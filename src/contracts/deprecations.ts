@@ -1,9 +1,8 @@
-/** The release that enforces every default this one announces. */
-export const ENFORCED_IN = '0.6.0'
-
 /**
  * A call that relied on a default a later release tightens. It still did what it did before;
- * `enforcedIn` names the release from which the same call is refused.
+ * `enforcedIn` names the release from which the same call is refused. A result lists these in
+ * `deprecations` during the minor that announces a change, and `serve` reports `DEPRECATED`.
+ * 0.6.0 enforced every default 0.5.0 announced, so no result lists one now.
  */
 export interface Deprecation {
   /** The parameter the caller should pass from now on. */
@@ -13,7 +12,7 @@ export interface Deprecation {
 }
 
 /** Adds a deprecation once per parameter. */
-export function addDeprecation(list: Deprecation[], parameter: string, message: string): void {
+export function addDeprecation(list: Deprecation[], parameter: string, message: string, enforcedIn: string): void {
   if (list.some(entry => entry.parameter === parameter)) return
-  list.push({ parameter, message, enforcedIn: ENFORCED_IN })
+  list.push({ parameter, message, enforcedIn })
 }
