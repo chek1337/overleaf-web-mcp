@@ -1,21 +1,35 @@
 <h1 align="center">Overleaf Web MCP</h1>
 
-<p align="center">Let Claude, Cursor, or any MCP client read, edit, compile, and review your Overleaf projects, signed in as you.</p>
+<p align="center"><strong>Let Claude, Cursor, or any MCP client read, edit, compile, and review your Overleaf projects, signed in as you.</strong></p>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/overleaf-web-mcp"><img alt="npm version" src="https://img.shields.io/npm/v/overleaf-web-mcp?color=1F6FEB"></a>
-  <a href="https://www.npmjs.com/package/overleaf-web-mcp"><img alt="Total npm downloads" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmhmdaskari%2Foverleaf-web-mcp%2Fbadges%2Fnpm-downloads.json"></a>
-  <img alt="Node.js 20 or newer" src="https://img.shields.io/badge/Node.js-20%2B-339933?logo=nodedotjs&amp;logoColor=white">
-  <img alt="31 MCP tools" src="https://img.shields.io/badge/MCP-31_tools-1F6FEB">
-  <a href="https://mhmdaskari.github.io/overleaf-web-mcp/"><img alt="Documentation" src="https://img.shields.io/badge/docs-mhmdaskari.github.io-0F766E"></a>
-  <img alt="MIT license" src="https://img.shields.io/badge/License-MIT-0F766E">
+  <a href="https://mhmdaskari.github.io/overleaf-web-mcp/"><strong>Docs</strong></a> &nbsp;·&nbsp;
+  <a href="#get-started"><strong>Get started</strong></a> &nbsp;·&nbsp;
+  <a href="#tools"><strong>Tools</strong></a> &nbsp;·&nbsp;
+  <a href="#how-it-keeps-your-project-safe"><strong>Safety</strong></a> &nbsp;·&nbsp;
+  <a href="#how-it-compares"><strong>Compare</strong></a> &nbsp;·&nbsp;
+  <a href="https://mhmdaskari.github.io/overleaf-web-mcp/changelog/"><strong>Changelog</strong></a>
 </p>
 
 <p align="center">
-  <img src="docs/assets/overleaf-web-mcp-workflow.webp" alt="An MCP client connected through an authenticated web session to an Overleaf workspace for project files, LaTeX editing, compilation, and review replies" width="100%">
+  <a href="https://www.npmjs.com/package/overleaf-web-mcp"><img alt="npm version" src="https://img.shields.io/npm/v/overleaf-web-mcp?style=flat-square&amp;logo=npm&amp;label=npm&amp;color=1F6FEB"></a>
+  <a href="https://www.npmjs.com/package/overleaf-web-mcp"><img alt="Total npm downloads" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmhmdaskari%2Foverleaf-web-mcp%2Fbadges%2Fnpm-downloads.json&amp;style=flat-square"></a>
+  <a href="https://github.com/mhmdaskari/overleaf-web-mcp/actions/workflows/ci.yml"><img alt="CI status" src="https://img.shields.io/github/actions/workflow/status/mhmdaskari/overleaf-web-mcp/ci.yml?branch=main&amp;style=flat-square&amp;logo=githubactions&amp;logoColor=white&amp;label=CI"></a>
+  <img alt="Node.js 20 or newer" src="https://img.shields.io/badge/Node.js-20%2B-339933?style=flat-square&amp;logo=nodedotjs&amp;logoColor=white">
+  <a href="#tools"><img alt="31 MCP tools" src="https://img.shields.io/badge/MCP-31_tools-1F6FEB?style=flat-square"></a>
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-0F766E?style=flat-square"></a>
+  <br>
+  <a href="https://mhmdaskari.github.io/overleaf-web-mcp/install/"><img alt="Works with Claude Code, Claude Desktop, Cursor, and VS Code" src="https://img.shields.io/badge/works_with-Claude_Code_%7C_Claude_Desktop_%7C_Cursor_%7C_VS_Code-7C3AED?style=flat-square"></a>
 </p>
 
-Overleaf Web MCP is an unofficial [Model Context Protocol](https://modelcontextprotocol.io) server. It signs in to Overleaf once through a browser window you control, then lets an AI assistant work on your projects the way you would in the web editor: browse files, make revision-checked edits, optionally as tracked changes, compile, and handle review comments. It uses the same browser-facing endpoints the Overleaf editor uses, so no Git integration or premium plan is needed for the core workflow.
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/overleaf-web-mcp-workflow-dark.webp">
+    <img src="docs/assets/overleaf-web-mcp-workflow.webp" alt="An MCP client connected through an authenticated web session to an Overleaf workspace for project files, LaTeX editing, compilation, and review replies" width="100%">
+  </picture>
+</p>
+
+Overleaf Web MCP is a [Model Context Protocol](https://modelcontextprotocol.io) server. It signs in to Overleaf once through a browser window you control, then lets an AI assistant work on your projects the way you would in the web editor: browse files, make revision-checked edits, optionally as tracked changes, compile, and handle review comments. It uses the same browser-facing endpoints the Overleaf editor uses, so no Git integration or premium plan is needed for the core workflow.
 
 ## What you can say
 
@@ -29,12 +43,12 @@ Once connected, talk to your assistant in plain language. It picks the tools.
 - "Make the project match `~/papers/thesis`, and show me what would be deleted first."
 - "Summarize the open review comments and reply to the one about Table 2."
 
-> [!CAUTION]
-> This client uses Overleaf's private, browser-facing APIs, which Overleaf may change without notice. Automating `www.overleaf.com` may carry Terms-of-Service and account risk. Start with a disposable project and keep request volume low.
-
 ## Get started
 
 You need Node.js 20 or newer, a Chrome-family browser (Chrome, Chromium, Brave, or Edge), and an Overleaf account.
+
+> [!NOTE]
+> The server uses Overleaf's private web APIs, which can change without notice, and automating `www.overleaf.com` may carry Terms-of-Service risk. Try it on a disposable project first and keep request volume low.
 
 **1. Sign in once.** A dedicated browser window opens. Complete the normal Overleaf login, including SSO or two-factor. Only cookies for the Overleaf origin are saved, to a file only your user can read. The session lasts five days from its last use, so sign in again after five idle days, or schedule `npx overleaf-web-mcp keepalive` daily to keep it alive (see [configuration](https://mhmdaskari.github.io/overleaf-web-mcp/configuration/#keeping-the-session-alive)).
 
@@ -48,7 +62,10 @@ npx overleaf-web-mcp login
 claude mcp add overleaf --scope user -- npx -y overleaf-web-mcp serve
 ```
 
-For Claude Desktop, Cursor, VS Code, and other clients, add this to their MCP configuration:
+<details>
+<summary>Claude Desktop, Cursor, VS Code, and other clients</summary>
+
+Add this to the client's MCP configuration:
 
 ```json
 {
@@ -60,6 +77,8 @@ For Claude Desktop, Cursor, VS Code, and other clients, add this to their MCP co
   }
 }
 ```
+
+</details>
 
 **3. Restart the client** and ask it to check your Overleaf connection.
 
@@ -78,7 +97,12 @@ Client-by-client steps, self-hosted Overleaf, and troubleshooting, including the
 
 ## Tools
 
-All 31 tools, grouped as in the [tool reference](https://mhmdaskari.github.io/overleaf-web-mcp/tools/), which has every parameter and result. Read-only tools change nothing on Overleaf and write nothing on your computer. Destructive tools can replace or remove existing content. All but `stop_compile` need a value repeated back first: the path, name, or count of what they delete, the revision of the document they replace, the `planToken` of a folder sync, or `overwrite` for a file that exists. An upload that would replace a file, and a folder sync without a `planToken`, are refused unless that replacement or unplanned sync is asked for by name. The last column shows which tools read or write files on the computer the server runs on.
+31 tools in eight groups: account, project lifecycle, files, folder sync, sections, compilation, review, and history. Read-only tools change nothing on Overleaf and write nothing on your computer. Destructive tools can replace or remove existing content, and all but `stop_compile` need a value repeated back first: the path, name, or count of what they delete, the revision of the document they replace, the `planToken` of a folder sync, or `overwrite` for a file that exists.
+
+<details>
+<summary><strong>All 31 tools</strong>, with their annotations and local effects</summary>
+
+An upload that would replace a file, and a folder sync without a `planToken`, are refused unless that replacement or unplanned sync is asked for by name. The last column shows which tools read or write files on the computer the server runs on. Every parameter and result is in the [tool reference](https://mhmdaskari.github.io/overleaf-web-mcp/tools/).
 
 | Group | Tool | What it does | Annotation | Local effect |
 | --- | --- | --- | --- | --- |
@@ -113,6 +137,8 @@ All 31 tools, grouped as in the [tool reference](https://mhmdaskari.github.io/ov
 | Review | `add_comment` | Add a comment anchored to exact text | | |
 | Review | `set_comment_status` | Resolve or reopen a thread | destructive | |
 | History | `monitor_project_history` | Poll recent project history with a cursor | read-only | |
+
+</details>
 
 ## How it keeps your project safe
 
@@ -155,6 +181,9 @@ The three most-starred Overleaf MCP servers and the two closest in design to thi
 | Installs from | npm | npm | npm, Homebrew | source | npm | npm |
 | License | MIT | MIT | MIT | MIT | AGPL-3.0 | AGPL-3.0 |
 
+<details>
+<summary>Notes 1–14</summary>
+
 1. Only where Overleaf's Git bridge exists, which on a self-hosted instance means Server Pro.
 2. Documented, but sign-in appears to require overleaf.com's `overleaf_session2` cookie, which Community Edition does not set by default.
 3. Only the projects named in its own configuration.
@@ -169,6 +198,8 @@ The three most-starred Overleaf MCP servers and the two closest in design to thi
 12. Lists, replies to, resolves, and reopens threads, but cannot add a comment.
 13. Creates and renames projects.
 14. Reports what collaborators changed during the session.
+
+</details>
 
 ## Documentation
 
@@ -188,4 +219,4 @@ The server sends usage instructions to the MCP client when it connects, and ever
 
 ## License
 
-[MIT](LICENSE).
+[MIT](LICENSE). An independent project, not affiliated with or endorsed by Overleaf.
