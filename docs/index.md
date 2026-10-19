@@ -25,7 +25,7 @@ Once connected, you talk to your assistant in plain language. The assistant pick
 - "Create a new project called *Grant renewal* from the folder I zipped, and make `proposal.tex` the root."
 - "List my Overleaf projects and open the one called *Thesis*."
 - "Rewrite the introduction of `main.tex` for a general audience, as a tracked change."
-- "Compile the paper and tell me whether it built."
+- "Compile the paper and tell me whether it built cleanly, and where any errors are."
 - "Which figures in `./figures` differ from what's in the project? Upload only those."
 - "Make the project match `~/papers/thesis`, and show me what would be deleted first."
 - "Summarize the open review comments and reply to the one about Table 2."
@@ -49,8 +49,9 @@ Edits can be recorded as Overleaf tracked changes.
 
 **Work by section.** Parse `\section` headings in a file, read one section, and replace one section.
 
-**Compile.** Build the project's configured root document, or any document you name, and stop a
-running compile.
+**Compile.** Build the project's configured root document, or any document you name, and get its
+errors and warnings by file and line, with a clear answer on whether it built cleanly. Read the
+log, save the PDF or any other output locally, or stop a running compile.
 
 **Review.** List comment threads with their locations, reply, add a comment anchored to exact
 text, and resolve or reopen threads.
@@ -64,9 +65,8 @@ text, and resolve or reopen threads.
 - Tracked changes are opt-in and never silently downgraded to plain edits.
 - Deletes require the path, or the number of entries, to be confirmed; downloads, including a
   whole-project zip, never overwrite a local file unless asked, and never touch the saved session.
-- Given the `planToken` from `plan_sync`, a folder sync stops before changing anything if either
-  side changed since the plan. A sync without one, and an upload that replaces a file without
-  saying so, still run in 0.5.x and are refused from 0.6.0.
+- A folder sync needs the `planToken` from `plan_sync`, and stops before changing anything if
+  either side changed since the plan. An upload never replaces a file unless that is asked for.
 - An optional [access policy](configuration.md#access-policy) limits which projects, local
   folders, and kinds of change the server may touch.
 - A write that times out is observed, never resubmitted, so nothing is applied twice.

@@ -27,7 +27,13 @@ function fakeRuntime() {
     documents: { readFile: resolved(), writeFile: resolved() },
     createFile: resolved(),
     sections: { getSections: resolved(), getSectionContent: resolved(), writeSection: resolved() },
-    compile: { compileProject: resolved(), stopCompile: resolved() },
+    compile: {
+      compileProject: resolved(),
+      stopCompile: resolved(),
+      getCompileLog: resolved(),
+      downloadCompileOutput: resolved(),
+      readCompileOutput: resolved(),
+    },
     comments: {
       listComments: resolved(),
       replyToComment: resolved(),

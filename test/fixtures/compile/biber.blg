@@ -1,0 +1,9 @@
+[0] Config.pm:307> INFO - This is Biber 2.19
+[0] Config.pm:310> INFO - Logfile is 'output.blg'
+[52] biber:340> INFO - === Mon Jan  1, 2026, 12:00:00
+[70] Biber.pm:419> INFO - Reading 'output.bcf'
+[160] Biber.pm:4029> INFO - Looking for bibtex file 'refs.bib' for section 0
+[161] Utils.pm:411> ERROR - Cannot find 'refs.bib'!
+[162] Biber.pm:1215> WARN - I didn't find a database entry for 'knuth84' (section 0)
+[170] Biber.pm:132> INFO - WARNINGS: 1
+[170] Biber.pm:136> INFO - ERRORS: 1

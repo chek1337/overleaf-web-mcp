@@ -125,7 +125,7 @@ describe('entity API', () => {
     const path = `${directory}/plot.png`
     await writeFile(path, 'png')
 
-    await api.uploadFile('project', path)
+    await api.uploadFile('project', path, '', undefined, { overwrite: true })
 
     const form = http.postForm.mock.calls[0]?.[1]
     expect(form?.get('name')).toBe('plot.png')
@@ -155,7 +155,7 @@ describe('entity API', () => {
     const source = `${directory}/rewritten.tex`
     await writeFile(source, 'text')
 
-    const result = await api.uploadFile('project', source, 'chapters', 'old.tex')
+    const result = await api.uploadFile('project', source, 'chapters', 'old.tex', { uncheckedDocumentReplace: true })
 
     expect(result).toMatchObject({ path: 'chapters/old.tex', replaced: true })
     expect(http.postForm.mock.calls[0]?.[1]?.get('name')).toBe('old.tex')
@@ -172,7 +172,7 @@ describe('entity API', () => {
     const source = `${directory}/plot.png`
     await writeFile(source, 'png')
 
-    await expect(api.uploadFile('project', source)).rejects.toMatchObject({
+    await expect(api.uploadFile('project', source, '', undefined, { overwrite: true })).rejects.toMatchObject({
       code: 'INVALID_ARGUMENT',
       details: { overleafError: 'duplicate_file_name' },
     })

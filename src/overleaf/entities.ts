@@ -1,7 +1,6 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import { basename, posix } from 'node:path'
 
-import { addDeprecation, type Deprecation } from '../contracts/deprecations.js'
 import { McpError } from '../core/errors.js'
 import { gitBlobHash } from '../core/hash.js'
 import { AccessPolicy } from '../core/policy.js'
@@ -89,7 +88,7 @@ export interface UploadFileOptions {
   ifExists?: 'replace' | 'skip' | undefined
   /**
    * `false` refuses to replace anything (`CONFIRMATION_MISMATCH`); `true` confirms replacing a
-   * binary file. Omitted, a replacement still happens and is reported as deprecated.
+   * binary file. Omitted, replacing a binary needs `expectedHash`.
    */
   overwrite?: boolean | undefined
   /**
@@ -116,7 +115,6 @@ export interface UploadedFile {
    * account, since Overleaf then records the difference as tracked changes; otherwise `untracked`.
    */
   writeMode: 'untracked' | 'tracked'
-  deprecations?: Deprecation[]
 }
 
 /** With `ifExists: 'skip'`, what was already at the path and left alone. */
@@ -126,11 +124,6 @@ export interface SkippedUpload {
   entityId: string
   entityType: 'doc' | 'file'
 }
-
-const OVERWRITE_DEPRECATION =
-  'Replacing an existing binary file without overwrite: true or expectedHash is deprecated. From 0.6.0 it fails with CONFIRMATION_MISMATCH and nothing is sent.'
-const DOCUMENT_REPLACE_DEPRECATION =
-  'Replacing a text document by upload is a blind write with no revision check. From 0.6.0 it fails with INVALID_ARGUMENT unless uncheckedDocumentReplace is true; write_file with localPath replaces it with a revision check.'
 
 function describeEntity(entity: ProjectEntity): string {
   return entity.type === 'doc' ? 'text document' : entity.type === 'file' ? 'binary file' : 'folder'
@@ -298,7 +291,9 @@ export class EntitiesApi {
   }
 
   /**
-   * Uploads a local file, replacing any entity already at the destination path.
+   * Uploads a local file, replacing an entity already at the destination path only when asked:
+   * a binary with `overwrite: true` or a matching `expectedHash`, a document with
+   * `uncheckedDocumentReplace: true`.
    *
    * Overleaf upserts by name inside the destination folder. Per its source, a text document
    * replaced by text keeps its `entity_id`; a replaced binary, or a change between document and
@@ -337,7 +332,7 @@ export class EntitiesApi {
           const skipped: SkippedUpload = { path, skipped: true, entityId: existing.id, entityType: existing.type }
           return skipped
         }
-        const deprecations = this.#checkReplacement(path, existing, options)
+        this.#checkReplacement(path, existing, options)
         const replaced = existing !== undefined
         const form = new FormData()
         form.append('qqfile', new Blob([bytes]), name)
@@ -375,7 +370,6 @@ export class EntitiesApi {
           ...(hash === undefined ? {} : { hash }),
           trackChangesActive: connection.trackChangesActive,
           writeMode: tracked ? 'tracked' : 'untracked',
-          ...(deprecations.length === 0 ? {} : { deprecations }),
         }
         return uploaded
       })
@@ -386,10 +380,9 @@ export class EntitiesApi {
 
   /**
    * Decides, from the tree just read inside the upload's queue job, whether replacing what is at
-   * the path is allowed, before anything is sent. Returns the deprecated defaults it relied on.
+   * the path was asked for, before anything is sent.
    */
-  #checkReplacement(path: string, existing: ProjectEntity | undefined, options: UploadFileOptions): Deprecation[] {
-    const deprecations: Deprecation[] = []
+  #checkReplacement(path: string, existing: ProjectEntity | undefined, options: UploadFileOptions): void {
     if (options.expectedHash !== undefined && (existing?.type !== 'file' || existing.hash !== options.expectedHash)) {
       throw new McpError(
         'REMOTE_DRIFT',
@@ -401,7 +394,7 @@ export class EntitiesApi {
         { details: { changed: 'remote' } }
       )
     }
-    if (existing === undefined || existing.type === 'folder') return deprecations
+    if (existing === undefined || existing.type === 'folder') return
     if (options.overwrite === false) {
       throw new McpError(
         'CONFIRMATION_MISMATCH',
@@ -412,12 +405,19 @@ export class EntitiesApi {
       // Replacing a document this way has no revision check.
       this.#policy.assertEffect('unchecked-replace')
       if (options.uncheckedDocumentReplace !== true) {
-        addDeprecation(deprecations, 'uncheckedDocumentReplace', DOCUMENT_REPLACE_DEPRECATION)
+        throw new McpError(
+          'INVALID_ARGUMENT',
+          `The project already holds a text document at ${path}. Replacing it by upload is a blind write with no revision check: use read_file, then write_file with localPath, to replace it with one, or pass uncheckedDocumentReplace: true when nobody else is editing it. Nothing was uploaded.`,
+          { details: { missing: 'uncheckedDocumentReplace' } }
+        )
       }
     } else if (options.overwrite !== true && options.expectedHash === undefined) {
-      addDeprecation(deprecations, 'overwrite', OVERWRITE_DEPRECATION)
+      throw new McpError(
+        'CONFIRMATION_MISMATCH',
+        `The project already holds a binary file at ${path}. Pass overwrite: true, or expectedHash from get_project_tree, to replace it. Nothing was uploaded.`,
+        { details: { missing: 'overwrite' } }
+      )
     }
-    return deprecations
   }
 
   async downloadFile(

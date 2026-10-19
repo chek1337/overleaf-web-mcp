@@ -4,6 +4,97 @@ All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0.0, tool schemas and
 result shapes may change in a minor or patch release; each such change is listed below.
 
+## [0.6.0] - 2026-10-19
+
+Compile and build ergonomics. `compile_project` now reads the build's logs and says plainly
+whether the paper built cleanly, with errors and warnings by file and line, and two new tools read
+a build's log and save its PDF or any other output without compiling again. The three safety
+defaults 0.5.0 announced are enforced: a folder sync needs a plan, and an upload or batch upload
+replaces nothing unless asked. The server registers 31 tools, two more than 0.5.x. Planned in
+[ROADMAP.md](https://github.com/mhmdaskari/overleaf-web-mcp/blob/main/ROADMAP.md).
+
+### Added
+
+- **`get_compile_log`** (read-only): a bounded tail of a build's LaTeX log, or with
+  `kind: "bibtex"` its `.blg` log, with `format: "errors-only"` and `tail` (default 200 lines, at
+  most 2,000). It reads at most 1 MB and returns `{ buildId, file, log, truncated, errorLines }`.
+- **`download_compile_output`** (destructive, writes locally): saves `output.pdf`, or any output
+  such as `output.log` or `output.synctex.gz`, to a local path in one call, returning
+  `{ localPath, file, sizeBytes, buildId, replaced }`. An existing file is replaced only with
+  `overwrite: true`, atomically; a `.pdf` that does not start with `%PDF-` is refused.
+- **`compile_project` returns a `summary`**: `{ status, builtCleanly, pdfProduced, logRead,
+  errorCount, warningCount, errors, warnings, undefinedReferences, undefinedCitations,
+  missingFiles, pageCount?, pdfSizeBytes? }`. `builtCleanly` is the field to check, since Overleaf
+  reports `success` whenever a PDF came out, even after LaTeX errors. Errors and warnings are
+  `{ file?, line?, message }`, the first 20 of each, messages cut to 240 characters and never the
+  source excerpt TeX prints after `l.<n>`. The log parser is this package's own, written for MIT
+  and tested against fixture logs; it reads both TeX error forms, BibTeX, and Biber.
+- **`buildRef`** on `compile_project`'s result, and on a timed-out or terminated build's error
+  details: an opaque token naming the build to `get_compile_log` and `download_compile_output`, in
+  this process or a later one. Without it, both use the latest build compiled in this process.
+- **`stopOnFirstError`** and **`draft`** on `compile_project`, passed to Overleaf's compile
+  endpoint.
+- **`compile_project` declares an `outputSchema`** and returns `structuredContent`, as do both new
+  tools.
+- **Read-only MCP resources** `overleaf://project/{projectId}/output/output.log` and
+  `overleaf://project/{projectId}/output/output.pdf`, for the latest build in this process (a PDF
+  of at most 16 MB).
+- **Five error codes:** `COMPILE_RATE_LIMITED` (retryable, with `retryAfterMs` when known),
+  `COMPILE_UNAVAILABLE` (retryable), `COMPILE_TIMEOUT`, `NO_BUILD`, and `BUILD_NOT_FOUND`.
+- **`batch_upload` `onConflict: "fail"`**, now the default; see Changed.
+- `details.missing` on the refusals below, naming the parameter to pass.
+
+### Changed
+
+- **A build that ran is a result, not an error.** `compile_project` with Overleaf status
+  `failure` or `stopped-on-first-error` returns the summary instead of throwing `COMPILE_FAILED`.
+  A compile with no build to report on fails with a code by status: `too-recently-compiled`,
+  `rate-limited`, `autocompile-backoff`, `compile-in-progress`, and HTTP 429 are
+  `COMPILE_RATE_LIMITED`; `clsi-maintenance` and `unavailable` are `COMPILE_UNAVAILABLE`;
+  `timedout` is `COMPILE_TIMEOUT`; the rest, `validation-problems` included, stay
+  `COMPILE_FAILED`.
+- **Compile error details are exactly `{ status, rootFilePath, buildId?, buildRef? }`**, plus
+  `retryAfterMs` for `COMPILE_RATE_LIMITED` when known. `details.result`, deprecated in 0.5.0, is
+  gone.
+- **The compile response is validated where it arrives.** `outputFiles` entries are reduced to
+  `{ path, type, build? }`, without `url`; `stats` keeps numbers only; `timings`,
+  `pdfDownloadDomain`, `validationProblems`, and every other field are dropped. A response without
+  a `status`, or with malformed `outputFiles`, is `PROTOCOL_UNSUPPORTED` with
+  `{ endpoint: "compile", expectedKeys, receivedKeys }`.
+- **A `TIMEOUT` on the compile request is no longer retryable**, because Overleaf may still be
+  compiling.
+- The compile request adds `?file_line_errors=true`, so TeX names the file of each error, and
+  `compile_project` reads `output.log` and any `.blg` log after the build, so it needs the
+  `overleaf-read` effect as well as `compile` under an access policy.
+- **`sync_directory` requires a `planToken`.** Without one, and without `unplanned: true` for an
+  additive sync, it fails with `CONFIRMATION_MISMATCH` and `details.missing: "planToken"` before
+  anything is read. A mirror sync always needs one.
+- **`upload_file` replaces nothing unless asked.** Onto a binary without `overwrite: true` or
+  `expectedHash` it is `CONFIRMATION_MISMATCH` (`details.missing: "overwrite"`); onto a text
+  document without `uncheckedDocumentReplace: true` it is `INVALID_ARGUMENT`
+  (`details.missing: "uncheckedDocumentReplace"`), naming `write_file` with `localPath`. Nothing
+  is sent in either case.
+- **`batch_upload` has no default that replaces.** `onConflict` defaults to `"fail"`: when any
+  destination holds a document or binary file, the call fails with `CONFIRMATION_MISMATCH`
+  (`details.missing: "onConflict"`, `count`, and up to 25 `paths`) before anything is uploaded.
+  With `"overwrite"`, a text document is replaced only with `uncheckedDocumentReplace: true`, and
+  otherwise that file fails with `INVALID_ARGUMENT`. The result's `onConflict` can be `"fail"`.
+- **No result lists `deprecations`**: the field is removed from the `upload_file`,
+  `batch_upload`, and `sync_directory` output schemas, since every default it announced is now
+  enforced.
+- The tool descriptions of `compile_project`, `upload_file`, `batch_upload`, and
+  `sync_directory`, and the connect-time instructions (417 words), describe the new behaviour.
+
+### Documentation
+
+- The tool reference documents the summary, the status-to-code table, both new tools, and the
+  output resources, and drops the 0.5.x transition tables for the enforced defaults. The safety
+  model lists the new codes, the compile output guarantees, and what changed in 0.6.0. The private
+  API catalogue documents the output route, `file_line_errors`, `stopOnFirstError`, `draft`, the
+  statuses, and the build id and server id formats, and no longer says the response is passed
+  through. The README and the site's home page list the new tools, and the comparison now marks
+  reading the compile log and errors as supported.
+
 ## [0.5.1] - 2026-10-12
 
 Listed in the official MCP Registry. No tool was added, removed, or changed in schema or result
@@ -648,6 +739,8 @@ still registers 19 tools. Planned in [ROADMAP.md](https://github.com/mhmdaskari/
 - First release: browser-assisted session capture, project and file management, revision-checked
   and section-level writing, compilation, and review comments.
 
+[0.6.0]: https://github.com/mhmdaskari/overleaf-web-mcp/releases/tag/v0.6.0
+[0.5.1]: https://github.com/mhmdaskari/overleaf-web-mcp/releases/tag/v0.5.1
 [0.5.0]: https://github.com/mhmdaskari/overleaf-web-mcp/releases/tag/v0.5.0
 [0.4.1]: https://github.com/mhmdaskari/overleaf-web-mcp/releases/tag/v0.4.1
 [0.4.0]: https://github.com/mhmdaskari/overleaf-web-mcp/releases/tag/v0.4.0

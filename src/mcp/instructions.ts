@@ -12,13 +12,13 @@ Projects. create_project, clone_project, and import_project_zip return a new pro
 
 Editing text. Call read_file before write_file or write_section and pass back its revision unchanged. On REVISION_CONFLICT, read again and reconcile; never reuse a stale revision or retry a write blindly. Send the complete new text, or localPath for a file on disk; the server computes a minimal edit. writeMode "tracked" records an Overleaf tracked change for review and never falls back to untracked.
 
-Uploads. upload_file and batch_upload have no revision check. To replace a binary, pass overwrite: true or expectedHash from get_project_tree; to replace a text document, prefer write_file with localPath. deprecations in a result name a default that 0.6.0 refuses; pass what they ask for.
+Uploads. upload_file and batch_upload have no revision check and replace nothing unless asked. To replace a binary, pass overwrite: true or expectedHash from get_project_tree; to replace a text document, prefer write_file with localPath.
 
-Folders. plan_sync compares a local folder with a project folder and changes nothing; show the user its plan. sync_directory applies it: pass its planToken, and in mirror mode confirmDeleteCount equal to the remoteOnly count. REMOTE_DRIFT means something changed since the plan; plan again. Offer download_project_zip as a backup first. delete_entities deletes several paths with confirmCount.
+Folders. plan_sync compares a local folder with a project folder and changes nothing; show the user its plan. sync_directory applies it and requires its planToken, and in mirror mode confirmDeleteCount equal to the remoteOnly count. REMOTE_DRIFT means something changed since the plan; plan again. Offer download_project_zip as a backup first. delete_entities deletes several paths with confirmCount.
 
 Destructive actions. manage_entity delete needs confirmPath equal to path; a wrong confirmation fails with CONFIRMATION_MISMATCH and changes nothing. download_file and download_project_zip replace a local file only with overwrite: true. Confirm with the user before deleting or overwriting anything.
 
-Compiling. compile_project without rootFilePath builds the configured root document. Compiles spend the account's compile allowance; do not compile in a loop.
+Compiling. compile_project without rootFilePath builds the configured root document. Judge the build by summary.builtCleanly, never by status: "success" only means a PDF came out. summary lists errors by file and line; get_compile_log reads the log and download_compile_output saves the PDF, both without recompiling. Compiles spend the account's compile allowance; do not compile in a loop.
 
 Comments. add_comment needs a fresh revision, 1-based line and UTF-16 column positions, and expectedText equal to the selected text.
 

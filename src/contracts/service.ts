@@ -39,7 +39,7 @@ export interface OverleafServiceRuntime {
     writeMode?: WriteMode
   ): Promise<unknown>
   sections: Pick<SectionsApi, 'getSections' | 'getSectionContent' | 'writeSection'>
-  compile: Pick<CompileApi, 'compileProject' | 'stopCompile'>
+  compile: Pick<CompileApi, 'compileProject' | 'stopCompile' | 'downloadCompileOutput' | 'getCompileLog' | 'readCompileOutput'>
   comments: Pick<
     CommentsApi,
     'listComments' | 'replyToComment' | 'addComment' | 'setCommentStatus'

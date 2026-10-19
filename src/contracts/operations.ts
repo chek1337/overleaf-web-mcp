@@ -1,6 +1,8 @@
 import { z } from 'zod'
 
 import { DEFAULT_PROJECT_LIMIT, MAX_PROJECT_LIMIT } from '../overleaf/account.js'
+import { DEFAULT_LOG_TAIL, MAX_ERROR_LINES, MAX_LOG_CHARS, MAX_LOG_TAIL } from '../overleaf/compile.js'
+import { MAX_LOG_ENTRIES, MAX_MESSAGE_LENGTH } from '../overleaf/compile-log.js'
 import { COMPILERS, DEFAULT_ZIP_DOWNLOAD_TIMEOUT_MS } from '../overleaf/projects.js'
 import { BATCH_UPLOAD_LIMIT } from '../overleaf/sync.js'
 import type { Effect } from './effects.js'
@@ -34,6 +36,8 @@ export const OPERATION_NAMES = [
   'write_section',
   'compile_project',
   'stop_compile',
+  'get_compile_log',
+  'download_compile_output',
   'list_comments',
   'reply_to_comment',
   'add_comment',
@@ -93,15 +97,18 @@ const entityTypeSchema = z.enum(['doc', 'file', 'folder'])
 const syncActionSchema = z.enum(['create_folder', 'upload', 'write', 'create', 'delete'])
 const errorCodeSchema = z.string()
 const batchUploadActionSchema = z.enum(['create_folder', 'upload'])
-const deprecationsSchema = z
-  .array(z.object({ parameter: z.string(), message: z.string(), enforcedIn: z.string() }))
-  .optional()
 const uncheckedDocumentReplace = z
   .boolean()
   .optional()
   .describe(
     'Allow replacing a text document, a blind write with no revision check; prefer write_file with localPath when a collaborator may be editing'
   )
+
+const logEntrySchema = z.object({
+  file: z.string().optional(),
+  line: z.number().int().positive().optional(),
+  message: z.string(),
+})
 
 const projectSummarySchema = z.object({
   id: z.string(),
@@ -301,7 +308,7 @@ export const OPERATIONS = {
   },
   upload_file: {
     description:
-      'Upload a local file into a project folder. Overleaf decides whether it becomes a text document or a binary file, by extension and UTF-8 validity. Something already at the path is replaced: a replaced text document keeps its entity ID; a replaced binary file may get a new one. Replacing a binary needs overwrite: true, or expectedHash equal to its hash from get_project_tree; overwrite: false refuses with CONFIRMATION_MISMATCH and a different hash with REMOTE_DRIFT, nothing sent. expectedHash is checked just before the upload, not atomically with it. Replacing a text document is a blind write with no revision check: prefer write_file with localPath, and pass uncheckedDocumentReplace: true only when nobody else is editing it. writeMode in the result is tracked when Overleaf records that replacement as tracked changes, because track changes is on for this account. Until 0.6.0 a replacement without these parameters still happens and the result lists deprecations; from 0.6.0 it is refused.',
+      'Upload a local file into a project folder. Overleaf decides whether it becomes a text document or a binary file, by extension and UTF-8 validity. Something already at the path is replaced only when asked for, and otherwise nothing is sent. Replacing a binary needs overwrite: true, or expectedHash equal to its hash from get_project_tree; without either it is CONFIRMATION_MISMATCH, and a different hash is REMOTE_DRIFT. expectedHash is checked just before the upload, not atomically with it. Replacing a text document is a blind write with no revision check, so it needs uncheckedDocumentReplace: true, else INVALID_ARGUMENT: prefer read_file then write_file with localPath, and pass uncheckedDocumentReplace only when nobody else is editing it. overwrite: false refuses any replacement with CONFIRMATION_MISMATCH. A replaced text document keeps its entity ID; a replaced binary file may get a new one. writeMode in the result is tracked when Overleaf records a document replacement as tracked changes, because track changes is on for this account.',
     inputSchema: z.object({
       projectId,
       localPath: z.string().min(1),
@@ -314,7 +321,7 @@ export const OPERATIONS = {
       overwrite: z
         .boolean()
         .optional()
-        .describe('true allows replacing a binary file at the path; false refuses to replace anything'),
+        .describe('true allows replacing a binary file at the path; false refuses to replace anything; omitted, replacing a binary needs expectedHash'),
       expectedHash: z
         .string()
         .regex(/^[0-9a-f]{40}$/u)
@@ -330,14 +337,13 @@ export const OPERATIONS = {
       hash: z.string().optional(),
       trackChangesActive: z.boolean(),
       writeMode: z.enum(['untracked', 'tracked']),
-      deprecations: deprecationsSchema,
     }),
     annotations: { destructiveHint: true, idempotentHint: false },
     effects: ['local-read', 'overleaf-write', 'unchecked-replace'],
   },
   batch_upload: {
     description:
-      'Upload a list of local files to explicit project paths in one call, instead of one upload_file call per file. Each destinationPath is the full project path including the file name; missing folders are created. onConflict "overwrite" replaces a binary file already at the path; "skip" leaves an existing document or file untouched and lists it in skipped. Pass onConflict explicitly: omitted, it still overwrites, but from 0.6.0 no default replaces anything, and the result lists deprecations when it did. A folder at a destination path, or a file where a folder is needed, fails that file in either mode. Replacing a text document has no revision check, so use write_file or sync_directory for documents a collaborator may be editing; pass uncheckedDocumentReplace: true to replace them anyway, since without it a replaced document is listed in deprecations, and refused from 0.6.0. Every path is checked before anything is sent: a duplicate destination or a missing local file fails the call with nothing uploaded. Failures are per file and nothing is retried: the call continues past a failure unless stopOnError, and stops at RATE_LIMITED (Overleaf allows about 500 uploads per project in 15 minutes). It returns status, completed (with replaced per upload), skipped, failed, remaining, and verified, which is true when the tree read back afterwards confirmed every completed entry. A timed-out upload is classified from that read-back, never resubmitted: recoveredAfterTimeout when the path holds the local bytes, OUTCOME_UNKNOWN when the tree cannot tell. It saves tool calls, not time. Confirm overwrites with the user first.',
+      'Upload a list of local files to explicit project paths in one call, instead of one upload_file call per file. Each destinationPath is the full project path including the file name; missing folders are created. onConflict decides what happens when a document or file is already at a destination path: "fail", the default, refuses the whole call with CONFIRMATION_MISMATCH listing those paths, before anything is uploaded; "skip" leaves them untouched and lists them in skipped; "overwrite" replaces a binary file. Replacing a text document has no revision check, so with "overwrite" each one also needs uncheckedDocumentReplace: true, else that file fails with INVALID_ARGUMENT; use write_file or sync_directory for documents a collaborator may be editing. A folder at a destination path, or a file where a folder is needed, fails that file in any mode. Every path is checked before anything is sent: a duplicate destination or a missing local file fails the call with nothing uploaded. Failures are per file and nothing is retried: the call continues past a failure unless stopOnError, and stops at RATE_LIMITED (Overleaf allows about 500 uploads per project in 15 minutes). It returns status, completed (with replaced per upload), skipped, failed, remaining, and verified, which is true when the tree read back afterwards confirmed every completed entry. A timed-out upload is classified from that read-back, never resubmitted: recoveredAfterTimeout when the path holds the local bytes, OUTCOME_UNKNOWN when the tree cannot tell. It saves tool calls, not time. Confirm overwrites with the user first.',
     inputSchema: z.object({
       projectId,
       files: z
@@ -351,15 +357,15 @@ export const OPERATIONS = {
         .max(BATCH_UPLOAD_LIMIT)
         .describe(`Files to upload, in order; at most ${BATCH_UPLOAD_LIMIT}`),
       onConflict: z
-        .enum(['skip', 'overwrite'])
-        .optional()
-        .describe('What to do when something is already at a destination path; omitted, overwrite, which is deprecated'),
+        .enum(['fail', 'skip', 'overwrite'])
+        .default('fail')
+        .describe('What to do when a document or file is already at a destination path; fail (the default) uploads nothing'),
       uncheckedDocumentReplace,
       stopOnError: z.boolean().default(false).describe('Stop at the first failure instead of continuing'),
     }),
     outputSchema: z.object({
       status: z.enum(['complete', 'partial']),
-      onConflict: z.enum(['skip', 'overwrite']),
+      onConflict: z.enum(['fail', 'skip', 'overwrite']),
       completed: z.array(
         z.object({
           destinationPath: z.string(),
@@ -383,7 +389,6 @@ export const OPERATIONS = {
       ),
       remaining: z.array(z.object({ destinationPath: z.string(), action: batchUploadActionSchema })),
       verified: z.boolean(),
-      deprecations: deprecationsSchema,
     }),
     annotations: { destructiveHint: true, idempotentHint: false },
     effects: ['local-read', 'overleaf-read', 'overleaf-write', 'unchecked-replace'],
@@ -484,7 +489,7 @@ export const OPERATIONS = {
   },
   sync_directory: {
     description:
-      "Make a project folder match a local folder: upload new and changed files, and in mirror mode also delete what exists only in the project. Call plan_sync first, confirm the plan with the user, and pass its planToken; if the project or the folder changed since, REMOTE_DRIFT is returned and nothing changes. Without a planToken nothing is checked against a plan: the call still runs in this version, with planned false and a deprecations entry, and from 0.6.0 it is refused unless an additive sync passes unplanned: true. Changed text documents are replaced through revision-checked write_file edits, recorded as tracked changes when writeMode is tracked, so a concurrent edit fails that file with REVISION_CONFLICT rather than being overwritten. Binaries and new files are uploaded, and one whose path changed since the plan fails with REMOTE_DRIFT; with writeMode tracked, new .tex, .bib, and similar text files are created with tracked content instead. Missing folders are created. Uploads and writes run first. Deletes run only in mirror mode, only when confirmDeleteCount equals the number of remoteOnly entries, else CONFIRMATION_MISMATCH, and never after any upload or write failed. Failures are per file and nothing is retried: the call continues unless stopOnError, then returns status, completed, failed, remaining, and a planToken to resume with. It saves tool calls, not time.",
+      "Make a project folder match a local folder: upload new and changed files, and in mirror mode also delete what exists only in the project. Call plan_sync first, confirm the plan with the user, and pass its planToken; if the project or the folder changed since, REMOTE_DRIFT is returned and nothing changes. A planToken is required: without one the call is refused with CONFIRMATION_MISMATCH before anything is read, unless an additive sync passes unplanned: true to run without a plan on purpose (planned is then false); a mirror sync always needs one. Changed text documents are replaced through revision-checked write_file edits, recorded as tracked changes when writeMode is tracked, so a concurrent edit fails that file with REVISION_CONFLICT rather than being overwritten. Binaries and new files are uploaded, and one whose path changed since the plan fails with REMOTE_DRIFT; with writeMode tracked, new .tex, .bib, and similar text files are created with tracked content instead. Missing folders are created. Uploads and writes run first. Deletes run only in mirror mode, only when confirmDeleteCount equals the number of remoteOnly entries, else CONFIRMATION_MISMATCH, and never after any upload or write failed. Failures are per file and nothing is retried: the call continues unless stopOnError, then returns status, completed, failed, remaining, and a planToken to resume with. It saves tool calls, not time.",
     inputSchema: z.object({
       projectId,
       localFolderPath,
@@ -496,7 +501,7 @@ export const OPERATIONS = {
         .string()
         .min(1)
         .optional()
-        .describe('From plan_sync, or from a partial sync_directory to resume it'),
+        .describe('From plan_sync, or from a partial sync_directory to resume it; required unless an additive sync passes unplanned'),
       unplanned: z
         .boolean()
         .optional()
@@ -529,7 +534,6 @@ export const OPERATIONS = {
       identicalCount: z.number().int(),
       planToken: z.string().optional(),
       planned: z.boolean(),
-      deprecations: deprecationsSchema,
     }),
     annotations: { destructiveHint: true, idempotentHint: true },
     effects: ['local-read', 'overleaf-read', 'overleaf-write', 'overleaf-delete'],
@@ -585,20 +589,93 @@ export const OPERATIONS = {
   },
   compile_project: {
     description:
-      "Compile a project. Omit rootFilePath to build the root document configured in Overleaf, which is what the web UI's Recompile button uses; pass it to build a different document for this call only.",
+      `Compile a project and report on the build from its logs. Omit rootFilePath to build the root document configured in Overleaf, which is what the web UI's Recompile button uses; pass it to build a different document for this call only. Check summary.builtCleanly, not status: Overleaf reports status "success" whenever a PDF came out, even when LaTeX hit errors along the way. builtCleanly is true only when a PDF was produced, output.log was read, and it reports no error. summary lists the first ${MAX_LOG_ENTRIES} errors and warnings as { file?, line?, message } (errorCount and warningCount count all of them), undefined references and citations, missing files, pageCount, and pdfSizeBytes; messages never quote the document. A LaTeX error that stopped the build returns status "failure" with the same summary rather than an error. buildRef names this build to get_compile_log and download_compile_output, also in a later process. stopOnFirstError gives a short log holding the one error that matters; draft skips images for faster text-only builds. Compiles spend the account's compile allowance, so read the summary instead of recompiling. Errors: COMPILE_RATE_LIMITED (Overleaf ran nothing; wait details.retryAfterMs when given, then compile once more), COMPILE_UNAVAILABLE (try later), COMPILE_TIMEOUT (the build hit the time limit; details.buildRef, when present, reaches its partial log), COMPILE_FAILED (no build to report on), and TIMEOUT (the request timed out while Overleaf may still be compiling; it is not retried).`,
     inputSchema: z.object({
       projectId,
       rootFilePath: filePath.optional(),
       timeoutMs: z.number().int().min(1_000).max(15 * 60_000).optional(),
+      stopOnFirstError: z.boolean().optional().describe('Stop at the first LaTeX error, for a short log'),
+      draft: z.boolean().optional().describe('Draft mode: images become boxes, for faster text-only builds'),
+    }),
+    outputSchema: z.object({
+      status: z.string(),
+      outputFiles: z.array(z.object({ path: z.string(), type: z.string(), build: z.string().optional() })),
+      stats: z.record(z.string(), z.number()),
+      buildId: z.string().optional(),
+      clsiServerId: z.string().optional(),
+      rootFilePath: z.string(),
+      buildRef: z.string().optional(),
+      summary: z.object({
+        status: z.string(),
+        builtCleanly: z.boolean(),
+        pdfProduced: z.boolean(),
+        logRead: z.boolean(),
+        errorCount: z.number().int().nonnegative(),
+        warningCount: z.number().int().nonnegative(),
+        errors: z.array(logEntrySchema),
+        warnings: z.array(logEntrySchema),
+        undefinedReferences: z.array(z.string()),
+        undefinedCitations: z.array(z.string()),
+        missingFiles: z.array(z.string()),
+        pageCount: z.number().int().nonnegative().optional(),
+        pdfSizeBytes: z.number().int().nonnegative().optional(),
+      }),
     }),
     annotations: { destructiveHint: false, idempotentHint: false },
-    effects: ['compile'],
+    effects: ['compile', 'overleaf-read'],
   },
   stop_compile: {
     description: 'Stop the active Overleaf compile for a project.',
     inputSchema: z.object({ projectId }),
     annotations: { destructiveHint: true, idempotentHint: true },
     effects: ['compile'],
+  },
+  get_compile_log: {
+    description:
+      `Read a build's LaTeX log (output.log) or BibTeX log (kind "bibtex", the .blg file), without compiling again. Without buildRef it reads the latest build compile_project made in this server process, else NO_BUILD; Overleaf keeps build output only for a while, and an expired build is BUILD_NOT_FOUND. At most 1 MB of the log is read, from its start, and the last tail lines are returned (default ${DEFAULT_LOG_TAIL}, at most ${MAX_LOG_TAIL}, and at most ${MAX_LOG_CHARS} characters). format "errors-only" returns only the lines that start an error. errorLines lists the first ${MAX_ERROR_LINES} error lines with their 1-based line numbers, each cut to ${MAX_MESSAGE_LENGTH} characters. truncated says whether anything of the log was left out. The log quotes source lines near each error; prefer compile_project's summary when that is enough.`,
+    inputSchema: z.object({
+      projectId,
+      buildRef: z.string().min(1).optional().describe('From compile_project; defaults to the latest build in this process'),
+      kind: z.enum(['latex', 'bibtex']).default('latex'),
+      format: z.enum(['raw', 'errors-only']).default('raw'),
+      tail: z
+        .number()
+        .int()
+        .min(1)
+        .max(MAX_LOG_TAIL)
+        .default(DEFAULT_LOG_TAIL)
+        .describe('How many lines to return, from the end'),
+    }),
+    outputSchema: z.object({
+      buildId: z.string(),
+      file: z.string(),
+      log: z.string(),
+      truncated: z.boolean(),
+      errorLines: z.array(z.object({ line: z.number().int().positive(), text: z.string() })),
+    }),
+    annotations: { readOnlyHint: true },
+    effects: ['overleaf-read'],
+  },
+  download_compile_output: {
+    description:
+      "Save a build's compiled PDF, or another output file such as output.log, output.blg, or output.synctex.gz, to a local path on the server's own disk, in one call. file defaults to output.pdf and must be a relative output path without \"..\". Without buildRef it uses the latest build compile_project made in this server process, else NO_BUILD; a file the build did not produce is NOT_FOUND, and an expired build is BUILD_NOT_FOUND. The folder must exist. An existing file is replaced only when overwrite is true, else CONFIRMATION_MISMATCH and nothing is downloaded; a replacement is atomic. A .pdf that does not start with %PDF- is PROTOCOL_UNSUPPORTED and nothing is written. Returns the absolute localPath, file, sizeBytes, buildId, and replaced.",
+    inputSchema: z.object({
+      projectId,
+      localPath: z.string().min(1).describe('Local file to write, for example paper.pdf'),
+      file: z.string().min(1).max(255).optional().describe('Output file of the build; defaults to output.pdf'),
+      buildRef: z.string().min(1).optional().describe('From compile_project; defaults to the latest build in this process'),
+      overwrite: z.boolean().default(false).describe('Replace localPath if it already exists'),
+    }),
+    outputSchema: z.object({
+      localPath: z.string(),
+      file: z.string(),
+      sizeBytes: z.number().int().nonnegative(),
+      buildId: z.string(),
+      replaced: z.boolean(),
+    }),
+    // It writes a local file and can replace one, so it is not read-only.
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+    effects: ['overleaf-read', 'local-write'],
   },
   list_comments: {
     description:

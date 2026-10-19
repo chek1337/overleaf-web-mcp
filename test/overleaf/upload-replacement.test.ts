@@ -43,7 +43,7 @@ function harness(options: { trackChangesActive?: boolean; policy?: AccessPolicy 
 }
 
 async function localFile(name: string, content: string | Uint8Array): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), 'overleaf-upload-transition-'))
+  const directory = await mkdtemp(join(tmpdir(), 'overleaf-upload-replacement-'))
   const path = join(directory, name)
   await writeFile(path, content)
   return path
@@ -68,21 +68,21 @@ describe('upload_file onto an existing binary', () => {
     expect(http.postForm).not.toHaveBeenCalled()
   })
 
-  test('the matching hash or overwrite: true replaces it; an omitted overwrite still does, deprecated', async () => {
+  test('the matching hash or overwrite: true replaces it; neither is CONFIRMATION_MISMATCH with nothing sent', async () => {
     const { api, http } = harness()
     const png = await localFile('plot.png', new Uint8Array([9, 9]))
 
-    await expect(api.uploadFile('p', png, '', undefined, { expectedHash: OLD_HASH })).resolves.not.toHaveProperty('deprecations')
+    await expect(api.uploadFile('p', png)).rejects.toMatchObject({
+      code: 'CONFIRMATION_MISMATCH',
+      details: { missing: 'overwrite' },
+    })
+    expect(http.postForm).not.toHaveBeenCalled()
+    await expect(api.uploadFile('p', png, '', undefined, { expectedHash: OLD_HASH })).resolves.toMatchObject({ replaced: true })
     await expect(api.uploadFile('p', png, '', undefined, { overwrite: true })).resolves.toMatchObject({
       replaced: true,
       writeMode: 'untracked',
     })
-    const omitted = await api.uploadFile('p', png)
-    expect(omitted).toMatchObject({
-      replaced: true,
-      deprecations: [{ parameter: 'overwrite', enforcedIn: '0.6.0', message: expect.stringContaining('CONFIRMATION_MISMATCH') }],
-    })
-    expect(http.postForm).toHaveBeenCalledTimes(3)
+    expect(http.postForm).toHaveBeenCalledTimes(2)
   })
 
   test('a new path needs no confirmation, and expectedHash for a missing entity is drift', async () => {
@@ -101,20 +101,26 @@ describe('upload_file onto an existing binary', () => {
 })
 
 describe('upload_file onto an existing document', () => {
-  test('still replaces without uncheckedDocumentReplace, with a deprecation naming write_file', async () => {
-    const { api } = harness()
+  test('is refused without uncheckedDocumentReplace, naming write_file, with nothing sent', async () => {
+    const { api, http } = harness()
     const tex = await localFile('main.tex', '\\section{New}\n')
 
-    await expect(api.uploadFile('p', tex)).resolves.toMatchObject({
-      replaced: true,
-      deprecations: [{ parameter: 'uncheckedDocumentReplace', message: expect.stringContaining('write_file') }],
-    })
-    await expect(api.uploadFile('p', tex, '', undefined, { uncheckedDocumentReplace: true })).resolves.not.toHaveProperty(
-      'deprecations'
-    )
+    for (const options of [{}, { overwrite: true }]) {
+      const refused = api.uploadFile('p', tex, '', undefined, options)
+      await expect(refused).rejects.toMatchObject({
+        code: 'INVALID_ARGUMENT',
+        details: { missing: 'uncheckedDocumentReplace' },
+      })
+      await expect(refused).rejects.toThrow(/write_file with localPath/u)
+    }
     await expect(api.uploadFile('p', tex, '', undefined, { overwrite: false })).rejects.toMatchObject({
       code: 'CONFIRMATION_MISMATCH',
     })
+    expect(http.postForm).not.toHaveBeenCalled()
+    await expect(api.uploadFile('p', tex, '', undefined, { uncheckedDocumentReplace: true })).resolves.toMatchObject({
+      replaced: true,
+    })
+    expect(http.postForm).toHaveBeenCalledTimes(1)
   })
 
   test('is refused before sending when the policy does not allow unchecked replacement', async () => {

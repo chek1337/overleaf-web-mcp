@@ -6,7 +6,7 @@
   <a href="https://www.npmjs.com/package/overleaf-web-mcp"><img alt="npm version" src="https://img.shields.io/npm/v/overleaf-web-mcp?color=1F6FEB"></a>
   <a href="https://www.npmjs.com/package/overleaf-web-mcp"><img alt="Total npm downloads" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmhmdaskari%2Foverleaf-web-mcp%2Fbadges%2Fnpm-downloads.json"></a>
   <img alt="Node.js 20 or newer" src="https://img.shields.io/badge/Node.js-20%2B-339933?logo=nodedotjs&amp;logoColor=white">
-  <img alt="29 MCP tools" src="https://img.shields.io/badge/MCP-29_tools-1F6FEB">
+  <img alt="31 MCP tools" src="https://img.shields.io/badge/MCP-31_tools-1F6FEB">
   <a href="https://mhmdaskari.github.io/overleaf-web-mcp/"><img alt="Documentation" src="https://img.shields.io/badge/docs-mhmdaskari.github.io-0F766E"></a>
   <img alt="MIT license" src="https://img.shields.io/badge/License-MIT-0F766E">
 </p>
@@ -24,7 +24,7 @@ Once connected, talk to your assistant in plain language. It picks the tools.
 - "Create a new project called *Grant renewal* from the folder I zipped, and make `proposal.tex` the root."
 - "List my Overleaf projects and open the one called *Thesis*."
 - "Rewrite the introduction of `main.tex` for a general audience, as a tracked change."
-- "Compile the paper and tell me whether it built."
+- "Compile the paper and tell me whether it built cleanly, and where any errors are."
 - "Which figures in `./figures` differ from what's in the project? Upload only those."
 - "Make the project match `~/papers/thesis`, and show me what would be deleted first."
 - "Summarize the open review comments and reply to the one about Table 2."
@@ -72,13 +72,13 @@ Client-by-client steps, self-hosted Overleaf, and troubleshooting, including the
 - **Sync a folder.** Compare a local folder with the project without changing anything, then upload only what changed, and optionally delete what you removed locally, in one confirmed call. Changed text files go through the same revision-checked edits as a single write, so a collaborator's concurrent edit is never overwritten.
 - **Write safely.** Replace a whole document or a single section. Every edit is checked against the revision you read first, so a collaborator's concurrent change is reported instead of overwritten. Edits can be recorded as Overleaf tracked changes.
 - **Work by section.** Parse `\section` headings in a file, read one section, replace one section.
-- **Compile.** Build the project's configured root document, or any document you name, and stop a running compile.
+- **Compile.** Build the project's configured root document, or any document you name, and get the errors and warnings from its log by file and line, with a clear yes or no on whether it built cleanly. Read the full log, save the PDF or any other output locally, or stop a running compile.
 - **Review.** List comment threads with their locations, reply, add a comment anchored to exact text, and resolve or reopen threads.
 - **Follow history.** Poll recent project history with a version cursor to see who changed what.
 
 ## Tools
 
-All 29 tools, grouped as in the [tool reference](https://mhmdaskari.github.io/overleaf-web-mcp/tools/), which has every parameter and result. Read-only tools change nothing on Overleaf and write nothing on your computer. Destructive tools can replace or remove existing content. All but `stop_compile` need a value repeated back first: the path, name, or count of what they delete, the revision of the document they replace, the `planToken` of a folder sync, or `overwrite` for a file that exists. Until 0.6.0, an upload that replaces a file and a folder sync without a `planToken` still run without one and report a deprecation; from 0.6.0 they are refused. The last column shows which tools read or write files on the computer the server runs on.
+All 31 tools, grouped as in the [tool reference](https://mhmdaskari.github.io/overleaf-web-mcp/tools/), which has every parameter and result. Read-only tools change nothing on Overleaf and write nothing on your computer. Destructive tools can replace or remove existing content. All but `stop_compile` need a value repeated back first: the path, name, or count of what they delete, the revision of the document they replace, the `planToken` of a folder sync, or `overwrite` for a file that exists. An upload that would replace a file, and a folder sync without a `planToken`, are refused unless that replacement or unplanned sync is asked for by name. The last column shows which tools read or write files on the computer the server runs on.
 
 | Group | Tool | What it does | Annotation | Local effect |
 | --- | --- | --- | --- | --- |
@@ -104,8 +104,10 @@ All 29 tools, grouped as in the [tool reference](https://mhmdaskari.github.io/ov
 | Sections | `get_sections` | Parse the section headings of one file | read-only | |
 | Sections | `get_section_content` | Read one section's body | read-only | |
 | Sections | `write_section` | Replace one section's body, revision-checked | destructive | |
-| Compilation | `compile_project` | Compile the project | | |
+| Compilation | `compile_project` | Compile the project and report its errors and warnings from the log | | |
 | Compilation | `stop_compile` | Stop the active compile | destructive | |
+| Compilation | `get_compile_log` | Read the end of a build's LaTeX or BibTeX log | read-only | |
+| Compilation | `download_compile_output` | Save the compiled PDF, or another output file, locally | destructive | writes |
 | Review | `list_comments` | List review threads with their locations | read-only | |
 | Review | `reply_to_comment` | Reply in an existing thread | | |
 | Review | `add_comment` | Add a comment anchored to exact text | | |
@@ -118,7 +120,8 @@ All 29 tools, grouped as in the [tool reference](https://mhmdaskari.github.io/ov
 - Tracked changes are opt-in and never silently downgraded to plain edits.
 - Deleting a file requires its path to be confirmed, deleting several requires their count, and trashing or deleting a project requires its name. Projects go to the trash first; permanent deletion only works from there. Downloads, including a whole-project zip, never overwrite a local file unless asked, and never write over the saved session.
 - A write that times out is observed, never resubmitted, so nothing is applied twice. The same holds for each file in a batch upload.
-- Given the `planToken` from `plan_sync`, a folder sync stops before changing anything if the project or the folder changed since the plan. Without one there is nothing to compare against, which 0.6.0 will refuse. It deletes only in mirror mode, only with the delete count confirmed, and never after a failed upload.
+- A folder sync needs the `planToken` from `plan_sync`, and stops before changing anything if the project or the folder changed since the plan. It deletes only in mirror mode, only with the delete count confirmed, and never after a failed upload.
+- An upload never replaces a file unless asked: a binary needs `overwrite`, and a text document, which an upload replaces with no revision check, needs `uncheckedDocumentReplace`.
 - Optionally, you can limit which projects, which folders on your computer, and which kinds of change the server may touch ([access policy](https://mhmdaskari.github.io/overleaf-web-mcp/configuration/#access-policy)). It keeps an assistant inside what you gave it; it is not a sandbox.
 - Your session cookie stays on your machine in a file only you can read, and is never returned by any tool.
 - While a project is open, up to 90 seconds after the last call, you may appear online to collaborators.
@@ -130,7 +133,7 @@ The three most-starred Overleaf MCP servers and the two closest in design to thi
 | | **This project** | [OverleafMCP](https://github.com/mjyoo2/OverleafMCP) | [olcli](https://github.com/aloth/olcli) | [overleaf-mcp-server](https://github.com/YounesBensafia/overleaf-mcp-server) | [overleaf-mcp-rt](https://github.com/DanielHou315/overleaf-mcp-rt) | [netique/overleaf-mcp](https://github.com/netique/overleaf-mcp) |
 | --- | :---: | :---: | :---: | :---: | :---: | :---: |
 | Connects through | Web session | Git bridge | Web session | Git bridge | Web session | Web session |
-| Tools | 29 | 8 | 19 | 4 | 22 | 17 |
+| Tools | 31 | 8 | 19 | 4 | 22 | 17 |
 | Works without Overleaf's paid Git integration | ✅ | ❌ | ✅ | ❌ | ✅ | ✅ |
 | Self-hosted Overleaf | ✅ | ❌ | ✅ | 🟡¹ | ✅ | 🟡² |
 | List and search your projects | ✅ | 🟡³ | 🟡⁴ | ❌ | 🟡⁵ | ✅ |
@@ -144,7 +147,7 @@ The three most-starred Overleaf MCP servers and the two closest in design to thi
 | Uploads and downloads binary files | ✅ | ❌ | ✅ | ❌ | ✅ | 🟡¹¹ |
 | Compares a local folder with the project | ✅ | ❌ | ✅ | ❌ | ❌ | ❌ |
 | Compiles on Overleaf | ✅ | ❌ | ✅ | ❌ | ✅ | ✅ |
-| Reads the compile log and errors | ❌ | ❌ | ❌ | ❌ | ✅ | ✅ |
+| Reads the compile log and errors | ✅ | ❌ | ❌ | ❌ | ✅ | ✅ |
 | Review comments: list, reply, add, resolve | ✅ | ❌ | ✅ | ❌ | ✅ | 🟡¹² |
 | Creates, clones, imports, archives, and deletes projects | ✅ | ❌ | 🟡¹³ | ❌ | ❌ | ❌ |
 | Saves the root document, compiler, and TeX Live image | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
@@ -173,7 +176,7 @@ The three most-starred Overleaf MCP servers and the two closest in design to thi
 | --- | --- |
 | [Install](https://mhmdaskari.github.io/overleaf-web-mcp/install/) | Claude Code, Claude Desktop, Cursor, VS Code, self-hosted Overleaf, troubleshooting |
 | [Using it](https://mhmdaskari.github.io/overleaf-web-mcp/using/) | Example prompts and what happens underneath |
-| [Tool reference](https://mhmdaskari.github.io/overleaf-web-mcp/tools/) | All 29 tools with parameters and results |
+| [Tool reference](https://mhmdaskari.github.io/overleaf-web-mcp/tools/) | All 31 tools with parameters and results |
 | [Safety model](https://mhmdaskari.github.io/overleaf-web-mcp/safety/) | Revisions, tracked changes, confirmations, error codes |
 | [Configuration](https://mhmdaskari.github.io/overleaf-web-mcp/configuration/) | Environment variables, the access policy, proxies, where the session is stored, and keeping it alive |
 | [Internals](https://mhmdaskari.github.io/overleaf-web-mcp/internals/) | Protocol notes, reliability guarantees, related projects |

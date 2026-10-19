@@ -154,22 +154,27 @@ describe('upstream text never reaches an error', () => {
   })
 
   test('a compile status that is not an identifier', async () => {
-    const api = new CompileApi(
-      { postJson: async () => ({ status: `${SENTINEL} free text`, outputFiles: [{ url: SENTINEL }] }) },
-      async () => ({ id: 'd', name: 'main.tex', path: 'main.tex', type: 'doc', parentFolderId: 'root' })
-    )
+    const http = {
+      postJson: async () => ({
+        status: `${SENTINEL} free text`,
+        outputFiles: [{ path: 'output.log', type: 'log', url: SENTINEL }],
+      }),
+      getStream: async () => ({ body: new Response(SENTINEL).body! }),
+    }
+    const api = new CompileApi(http, async () => ({ id: 'd', name: 'main.tex', path: 'main.tex', type: 'doc', parentFolderId: 'root' }))
     const text = await serializedFailure(() => api.compileProject('p', 'main.tex'))
     expect(text).not.toContain(SENTINEL)
-    expect(JSON.parse(text)).toMatchObject({
-      code: 'COMPILE_FAILED',
-      details: { status: 'unrecognized', rootFilePath: 'main.tex', result: { status: 'unrecognized' } },
-    })
+    expect(JSON.parse(text)).toMatchObject({ code: 'COMPILE_FAILED' })
+    // details.result is gone; only these keys remain.
+    expect(JSON.parse(text).details).toEqual({ status: 'unrecognized', rootFilePath: 'main.tex' })
 
     const failed = new CompileApi(
-      { postJson: async () => ({ status: 'failure', outputFiles: [{ url: SENTINEL }] }) },
+      { ...http, postJson: async () => ({ status: 'failure', outputFiles: [{ path: 'output.log', type: 'log', url: SENTINEL }] }) },
       async () => ({ id: 'd', name: 'main.tex', path: 'main.tex', type: 'doc', parentFolderId: 'root' })
     )
-    const known = JSON.parse(await serializedFailure(() => failed.compileProject('p', 'main.tex')))
-    expect(known.details).toEqual({ status: 'failure', rootFilePath: 'main.tex', result: { status: 'failure' } })
+    // A failed build is a result with a summary, and it carries no URL from the response.
+    const result = await failed.compileProject('p', 'main.tex')
+    expect(JSON.stringify(result)).not.toContain(SENTINEL)
+    expect(result.summary).toMatchObject({ status: 'failure', builtCleanly: false })
   })
 })

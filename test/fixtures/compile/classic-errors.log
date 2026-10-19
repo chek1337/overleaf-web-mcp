@@ -1,0 +1,23 @@
+This is pdfTeX, Version 3.141592653-2.6-1.40.25 (TeX Live 2023) (preloaded format=pdflatex 2023.5.21)  1 JAN 2026 12:00
+**main.tex
+(./main.tex
+! Undefined control sequence.
+l.3 \undefined
+              
+The control sequence at the end of the top line
+of your error message was never \def'ed.
+
+! LaTeX Error: Environment theorem undefined.
+
+See the LaTeX manual or LaTeX Companion for explanation.
+Type  H <return>  for immediate help.
+ ...
+
+l.8 \begin{theorem}
+
+! Emergency stop.
+<*> main.tex
+
+*** (job aborted, no legal \end found)
+
+No pages of output.
