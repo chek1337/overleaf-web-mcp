@@ -33,6 +33,23 @@ worked. See [configuration](configuration.md#where-the-session-is-stored) for th
 
     `claude mcp remove overleaf` undoes it.
 
+=== "Codex"
+
+    One command adds the server to `~/.codex/config.toml` for every project:
+
+    ```bash
+    codex mcp add overleaf -- npx -y overleaf-web-mcp serve
+    ```
+
+    `codex mcp remove overleaf` undoes it. The command writes this entry, which you can also add
+    to `config.toml` by hand:
+
+    ```toml
+    [mcp_servers.overleaf]
+    command = "npx"
+    args = ["-y", "overleaf-web-mcp", "serve"]
+    ```
+
 === "Claude Desktop"
 
     Add the server to `claude_desktop_config.json`. On macOS it is at

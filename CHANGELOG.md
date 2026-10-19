@@ -4,6 +4,29 @@ All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0.0, tool schemas and
 result shapes may change in a minor or patch release; each such change is listed below.
 
+## [0.6.1] - 2026-10-19
+
+A refreshed README and package description. No tool was added, removed, or changed in schema or
+result shape; the server still registers 31 tools.
+
+### Changed
+
+- The npm package and the documentation site describe the server by what it does. The note that
+  it is an independent project, not affiliated with or endorsed by Overleaf, moves to one line at
+  the end of the README and the site footer, and the Terms-of-Service caution to a short note
+  under Get started and on the site's home page.
+- The weekly npm count badge is labelled `installs`.
+- Dependencies are refreshed within their declared ranges, which clears every `npm audit`
+  finding; all were in development-only packages, and the published package had none.
+
+### Documentation
+
+- The README has a navigation row, one badge style with CI status and the supported clients, and
+  a dark-theme version of the hero image, which the site's home page also uses. The tool table,
+  the configuration for other clients, and the comparison's notes are collapsible.
+- Codex is listed among the supported clients, with its `codex mcp add` command in the README and
+  a Codex tab in the installation guide. The README notes that VS Code uses a `servers` key.
+
 ## [0.6.0] - 2026-10-19
 
 Compile and build ergonomics. `compile_project` now reads the build's logs and says plainly
@@ -739,6 +762,7 @@ still registers 19 tools. Planned in [ROADMAP.md](https://github.com/mhmdaskari/
 - First release: browser-assisted session capture, project and file management, revision-checked
   and section-level writing, compilation, and review comments.
 
+[0.6.1]: https://github.com/mhmdaskari/overleaf-web-mcp/releases/tag/v0.6.1
 [0.6.0]: https://github.com/mhmdaskari/overleaf-web-mcp/releases/tag/v0.6.0
 [0.5.1]: https://github.com/mhmdaskari/overleaf-web-mcp/releases/tag/v0.5.1
 [0.5.0]: https://github.com/mhmdaskari/overleaf-web-mcp/releases/tag/v0.5.0

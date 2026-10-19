@@ -1,5 +1,5 @@
 site_name: Overleaf Web MCP
-site_description: Unofficial MCP server that lets an AI assistant browse, edit, compile, and review your Overleaf projects through your own web session.
+site_description: MCP server that lets an AI assistant browse, edit, compile, and review your Overleaf projects through your own web session.
 site_url: https://mhmdaskari.github.io/overleaf-web-mcp/
 repo_url: https://github.com/mhmdaskari/overleaf-web-mcp
 repo_name: mhmdaskari/overleaf-web-mcp

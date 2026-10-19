@@ -83,6 +83,6 @@ describe('npm download badge', () => {
   })
 
   test('writes a shields.io endpoint badge', () => {
-    expect(downloadsBadge(1801)).toEqual({ schemaVersion: 1, label: 'downloads', message: '1.8k', color: '1F6FEB' })
+    expect(downloadsBadge(1801)).toEqual({ schemaVersion: 1, label: 'installs', message: '1.8k', color: '1F6FEB' })
   })
 })

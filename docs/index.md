@@ -1,22 +1,24 @@
 # Overleaf Web MCP
 
-Let Claude, Cursor, or any [Model Context Protocol](https://modelcontextprotocol.io) client read,
-edit, compile, and review your Overleaf projects, signed in as you.
+Let Claude, Codex, Cursor, or any [Model Context Protocol](https://modelcontextprotocol.io) client
+read, edit, compile, and review your Overleaf projects, signed in as you.
 
-[![npm version](https://img.shields.io/npm/v/overleaf-web-mcp?color=1F6FEB)](https://www.npmjs.com/package/overleaf-web-mcp)
-[![Total npm downloads](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmhmdaskari%2Foverleaf-web-mcp%2Fbadges%2Fnpm-downloads.json)](https://www.npmjs.com/package/overleaf-web-mcp)
+[![npm version](https://img.shields.io/npm/v/overleaf-web-mcp?style=flat-square&logo=npm&label=npm&color=1F6FEB)](https://www.npmjs.com/package/overleaf-web-mcp)
+[![Total npm installs](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmhmdaskari%2Foverleaf-web-mcp%2Fbadges%2Fnpm-downloads.json&style=flat-square&label=installs)](https://www.npmjs.com/package/overleaf-web-mcp)
 
-![An MCP client connected through an authenticated web session to an Overleaf workspace](assets/overleaf-web-mcp-workflow.webp)
+![An MCP client connected through an authenticated web session to an Overleaf workspace](assets/overleaf-web-mcp-workflow.webp#only-light)
+![An MCP client connected through an authenticated web session to an Overleaf workspace](assets/overleaf-web-mcp-workflow-dark.webp#only-dark)
 
-Overleaf Web MCP is an unofficial server that signs in to Overleaf once through a browser window
+Overleaf Web MCP is a server that signs in to Overleaf once through a browser window
 you control, then lets an AI assistant work on your projects the way you would in the web editor.
 It uses the same browser-facing endpoints the Overleaf editor uses, so it needs no Git
 integration and no premium plan for the core workflow.
 
-!!! danger "Unofficial client of private APIs"
-    Overleaf may change these interfaces without notice, and automating `www.overleaf.com` may
-    carry Terms-of-Service and account risk. Start with a disposable project, keep request volume
-    low, and review Overleaf's current terms before using an account you care about.
+!!! note
+    It relies on Overleaf's private web APIs, which can change without notice, and automating
+    `www.overleaf.com` may carry Terms-of-Service risk. Read
+    [what this does not protect against](safety.md#what-this-does-not-protect-against) before
+    using an account you care about.
 
 ## What you can say
 
