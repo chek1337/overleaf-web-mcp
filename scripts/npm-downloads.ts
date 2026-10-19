@@ -108,7 +108,7 @@ export async function totalDownloads(name: string, ranges: DateRange[], fetcher:
 }
 
 export function downloadsBadge(total: number): EndpointBadge {
-  return { schemaVersion: 1, label: 'downloads', message: compactCount(total), color: '1F6FEB' }
+  return { schemaVersion: 1, label: 'installs', message: compactCount(total), color: '1F6FEB' }
 }
 
 async function main(): Promise<void> {

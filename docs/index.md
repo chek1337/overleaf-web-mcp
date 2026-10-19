@@ -4,7 +4,7 @@ Let Claude, Cursor, or any [Model Context Protocol](https://modelcontextprotocol
 edit, compile, and review your Overleaf projects, signed in as you.
 
 [![npm version](https://img.shields.io/npm/v/overleaf-web-mcp?style=flat-square&logo=npm&label=npm&color=1F6FEB)](https://www.npmjs.com/package/overleaf-web-mcp)
-[![Total npm downloads](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmhmdaskari%2Foverleaf-web-mcp%2Fbadges%2Fnpm-downloads.json&style=flat-square)](https://www.npmjs.com/package/overleaf-web-mcp)
+[![Total npm installs](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmhmdaskari%2Foverleaf-web-mcp%2Fbadges%2Fnpm-downloads.json&style=flat-square&label=installs)](https://www.npmjs.com/package/overleaf-web-mcp)
 
 ![An MCP client connected through an authenticated web session to an Overleaf workspace](assets/overleaf-web-mcp-workflow.webp#only-light)
 ![An MCP client connected through an authenticated web session to an Overleaf workspace](assets/overleaf-web-mcp-workflow-dark.webp#only-dark)
