@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { CookieJar } from 'tough-cookie'
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 
 import {
   assertCookieFilePermissions,
@@ -137,6 +137,30 @@ describe('Netscape cookie jars', () => {
     expect(await loaded.sessionExpiresAt('https://www.overleaf.test/project')).toBe(
       new Date(deadline * 1000).toISOString()
     )
+  })
+
+  test('dates a Max-Age deadline from its arrival, not from the latest read', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'overleaf-cookie-received-'))
+    const path = join(directory, 'cookies.txt')
+    await writeFile(path, '# Netscape HTTP Cookie File\n', { mode: 0o600 })
+    const store = await CookieStore.load(path)
+    const arrived = Date.parse('2026-10-19T23:31:59.900Z')
+    const deadline = new Date(arrived + 432_000_000).toISOString()
+
+    vi.useFakeTimers({ toFake: ['Date'], now: arrived })
+    try {
+      await store.mergeSetCookies('https://www.overleaf.test/project', [
+        'overleaf_session2=rolled; Domain=.overleaf.test; Path=/; Secure; HttpOnly; Max-Age=432000',
+      ])
+      // tough-cookie counts Max-Age from the last read, so a read past the next second moved it.
+      vi.setSystemTime(arrived + 200)
+      expect(await store.sessionExpiresAt('https://www.overleaf.test/project')).toBe(deadline)
+      expect(await readFile(path, 'utf8')).toContain(
+        `\t${Math.floor(Date.parse(deadline) / 1000)}\toverleaf_session2\trolled`
+      )
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   test('reports the earliest finite deadline among the cookies a request would carry', async () => {

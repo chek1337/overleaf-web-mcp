@@ -94,6 +94,20 @@ function cookieToNetscape(cookie: Cookie): string {
   ].join('\t')
 }
 
+/**
+ * RFC 6265 counts Max-Age from when the cookie arrives, but tough-cookie counts it from
+ * `lastAccessed`, which every `getCookies()` moves forward. Turning it into an absolute `expires`
+ * on arrival keeps the deadline the jar file records and the one `sessionExpiresAt` reports at the
+ * same instant, however often the cookie is read afterwards.
+ */
+function withArrivalDeadline(header: string, arrivedAt: number): Cookie | string {
+  const cookie = Cookie.parse(header)
+  if (cookie === undefined || typeof cookie.maxAge !== 'number' || cookie.maxAge <= 0) return header
+  cookie.expires = new Date(arrivedAt + cookie.maxAge * 1000)
+  cookie.maxAge = null
+  return cookie
+}
+
 function serializeJar(jar: CookieJar): string {
   const serialized = jar.serializeSync()
   const cookies = (serialized?.cookies ?? [])
@@ -170,7 +184,10 @@ export class CookieStore {
   }
 
   async mergeSetCookies(url: string, setCookies: string[]): Promise<void> {
-    for (const value of setCookies) await this.jar.setCookie(value, url)
+    const arrivedAt = Date.now()
+    for (const value of setCookies) {
+      await this.jar.setCookie(withArrivalDeadline(value, arrivedAt), url)
+    }
     if (setCookies.length === 0) return
 
     let release: (() => Promise<void>) | undefined
@@ -181,7 +198,9 @@ export class CookieStore {
       })
       // Reload under the lock so concurrent server processes do not overwrite each other's refreshes.
       const latest = await parseNetscapeCookies(await readFile(this.path, 'utf8'))
-      for (const value of setCookies) await latest.setCookie(value, url)
+      for (const value of setCookies) {
+        await latest.setCookie(withArrivalDeadline(value, arrivedAt), url)
+      }
       await this.jar.removeAllCookies()
       for (const cookie of latest.serializeSync()?.cookies ?? []) {
         const parsed = Cookie.fromJSON(cookie)
