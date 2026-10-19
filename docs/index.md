@@ -1,7 +1,7 @@
 # Overleaf Web MCP
 
-Let Claude, Cursor, or any [Model Context Protocol](https://modelcontextprotocol.io) client read,
-edit, compile, and review your Overleaf projects, signed in as you.
+Let Claude, Codex, Cursor, or any [Model Context Protocol](https://modelcontextprotocol.io) client
+read, edit, compile, and review your Overleaf projects, signed in as you.
 
 [![npm version](https://img.shields.io/npm/v/overleaf-web-mcp?style=flat-square&logo=npm&label=npm&color=1F6FEB)](https://www.npmjs.com/package/overleaf-web-mcp)
 [![Total npm installs](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmhmdaskari%2Foverleaf-web-mcp%2Fbadges%2Fnpm-downloads.json&style=flat-square&label=installs)](https://www.npmjs.com/package/overleaf-web-mcp)

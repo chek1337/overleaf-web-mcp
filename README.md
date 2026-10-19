@@ -1,6 +1,6 @@
 <h1 align="center">Overleaf Web MCP</h1>
 
-<p align="center"><strong>Let Claude, Cursor, or any MCP client read, edit, compile, and review your Overleaf projects, signed in as you.</strong></p>
+<p align="center"><strong>Let Claude, Codex, Cursor, or any MCP client read, edit, compile, and review<br>your Overleaf projects, signed in as you.</strong></p>
 
 <p align="center">
   <a href="https://mhmdaskari.github.io/overleaf-web-mcp/"><strong>Docs</strong></a> &nbsp;·&nbsp;
@@ -19,7 +19,7 @@
   <a href="#tools"><img alt="31 MCP tools" src="https://img.shields.io/badge/MCP-31_tools-1F6FEB?style=flat-square"></a>
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-0F766E?style=flat-square"></a>
   <br>
-  <a href="https://mhmdaskari.github.io/overleaf-web-mcp/install/"><img alt="Works with Claude Code, Claude Desktop, Cursor, and VS Code" src="https://img.shields.io/badge/works_with-Claude_Code_%7C_Claude_Desktop_%7C_Cursor_%7C_VS_Code-7C3AED?style=flat-square"></a>
+  <a href="https://mhmdaskari.github.io/overleaf-web-mcp/install/"><img alt="Works with Claude Code, Codex, Cursor, and VS Code" src="https://img.shields.io/badge/works_with-Claude_Code_%7C_Codex_%7C_Cursor_%7C_VS_Code-7C3AED?style=flat-square"></a>
 </p>
 
 <p align="center">
@@ -62,6 +62,12 @@ npx overleaf-web-mcp login
 claude mcp add overleaf --scope user -- npx -y overleaf-web-mcp serve
 ```
 
+For Codex:
+
+```bash
+codex mcp add overleaf -- npx -y overleaf-web-mcp serve
+```
+
 <details>
 <summary>Claude Desktop, Cursor, VS Code, and other clients</summary>
 
@@ -77,6 +83,8 @@ Add this to the client's MCP configuration:
   }
 }
 ```
+
+VS Code uses a `servers` key and `"type": "stdio"` instead; the [installation guide](https://mhmdaskari.github.io/overleaf-web-mcp/install/) has the exact block for each client.
 
 </details>
 
@@ -205,7 +213,7 @@ The three most-starred Overleaf MCP servers and the two closest in design to thi
 
 | Page | What it covers |
 | --- | --- |
-| [Install](https://mhmdaskari.github.io/overleaf-web-mcp/install/) | Claude Code, Claude Desktop, Cursor, VS Code, self-hosted Overleaf, troubleshooting |
+| [Install](https://mhmdaskari.github.io/overleaf-web-mcp/install/) | Claude Code, Codex, Claude Desktop, Cursor, VS Code, self-hosted Overleaf, troubleshooting |
 | [Using it](https://mhmdaskari.github.io/overleaf-web-mcp/using/) | Example prompts and what happens underneath |
 | [Tool reference](https://mhmdaskari.github.io/overleaf-web-mcp/tools/) | All 31 tools with parameters and results |
 | [Safety model](https://mhmdaskari.github.io/overleaf-web-mcp/safety/) | Revisions, tracked changes, confirmations, error codes |
