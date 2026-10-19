@@ -3,6 +3,8 @@ dist/
 coverage/
 .env
 *.log
+# Sanitized compile logs the parser tests read.
+!test/fixtures/compile/*.log
 *.tgz
 .DS_Store
 site/
