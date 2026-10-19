@@ -16,6 +16,8 @@ result shape; the server still registers 31 tools.
   the end of the README and the site footer, and the Terms-of-Service caution to a short note
   under Get started and on the site's home page.
 - The weekly npm count badge is labelled `installs`.
+- Dependencies are refreshed within their declared ranges, which clears every `npm audit`
+  finding; all were in development-only packages, and the published package had none.
 
 ### Documentation
 
