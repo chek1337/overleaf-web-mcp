@@ -16,7 +16,7 @@ integration and no premium plan for the core workflow.
 
 !!! note
     It relies on Overleaf's private web APIs, which can change without notice, and automating
-    `www.overleaf.com` may carry Terms-of-Service risk. Read
+    `www.overleaf.com` may carry Terms-of-Service and account risk. Read
     [what this does not protect against](safety.md#what-this-does-not-protect-against) before
     using an account you care about.
 

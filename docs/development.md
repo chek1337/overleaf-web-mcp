@@ -84,7 +84,7 @@ work on GitHub, npm, and the site alike.
 
 ## Download badge
 
-The downloads badge in the README and on the site's home page reads `npm-downloads.json` from
+The npm count badge (labelled `installs`) in the README and on the site's home page reads `npm-downloads.json` from
 the `badges` branch through a shields.io endpoint badge. The `Download count` workflow
 (`.github/workflows/download-count.yml`) refreshes it every Monday and can be run by hand: it runs
 `scripts/npm-downloads.ts`, which sums the package's all-time downloads from npm's downloads API,

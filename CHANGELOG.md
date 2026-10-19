@@ -13,9 +13,9 @@ result shape; the server still registers 31 tools.
 
 - The npm package and the documentation site describe the server by what it does. The note that
   it is an independent project, not affiliated with or endorsed by Overleaf, moves to one line at
-  the end of the README and the site footer, and the Terms-of-Service caution to a short note
-  under Get started and on the site's home page.
-- The weekly npm count badge is labelled `installs`.
+  the end of the README, and the site footer keeps its note. The Terms-of-Service and account
+  risk caution becomes a short note under Get started and on the site's home page.
+- The npm download-count badge, an all-time total refreshed weekly, is labelled `installs`.
 - Dependencies are refreshed within their declared ranges, which clears every `npm audit`
   finding; all were in development-only packages, and the published package had none.
 

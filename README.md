@@ -24,7 +24,7 @@
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/overleaf-web-mcp-workflow-dark.webp">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/mhmdaskari/overleaf-web-mcp/main/docs/assets/overleaf-web-mcp-workflow-dark.webp">
     <img src="docs/assets/overleaf-web-mcp-workflow.webp" alt="An MCP client connected through an authenticated web session to an Overleaf workspace for project files, LaTeX editing, compilation, and review replies" width="100%">
   </picture>
 </p>
@@ -48,7 +48,7 @@ Once connected, talk to your assistant in plain language. It picks the tools.
 You need Node.js 20 or newer, a Chrome-family browser (Chrome, Chromium, Brave, or Edge), and an Overleaf account.
 
 > [!NOTE]
-> The server uses Overleaf's private web APIs, which can change without notice, and automating `www.overleaf.com` may carry Terms-of-Service risk. Try it on a disposable project first and keep request volume low.
+> The server uses Overleaf's private web APIs, which can change without notice, and automating `www.overleaf.com` may carry Terms-of-Service and account risk. Try it on a disposable project first and keep request volume low.
 
 **1. Sign in once.** A dedicated browser window opens. Complete the normal Overleaf login, including SSO or two-factor. Only cookies for the Overleaf origin are saved, to a file only your user can read. The session lasts five days from its last use, so sign in again after five idle days, or schedule `npx overleaf-web-mcp keepalive` daily to keep it alive (see [configuration](https://mhmdaskari.github.io/overleaf-web-mcp/configuration/#keeping-the-session-alive)).
 
