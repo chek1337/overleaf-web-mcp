@@ -45,24 +45,26 @@ which is reversible, and permanent deletion only from the trash. `download_file`
 Replacements are confirmed by value or by expected state too. `upload_file` replaces a binary
 file with `overwrite: true` or with `expectedHash` equal to the hash it has now, and a text
 document with `uncheckedDocumentReplace: true`; `overwrite: false` refuses to replace anything.
-`batch_upload` replaces only with an explicit `onConflict: "overwrite"`, and documents only with
-`uncheckedDocumentReplace: true`. A `revision` or a `planToken` counts as expected-state
+Without them, nothing is sent: a binary is `CONFIRMATION_MISMATCH` and a document
+`INVALID_ARGUMENT`, naming `write_file` with `localPath`. `batch_upload` replaces only with an
+explicit `onConflict: "overwrite"`, and documents only with `uncheckedDocumentReplace: true`; its
+default, `onConflict: "fail"`, refuses the whole call before any upload when a destination is
+taken. A `revision` or a `planToken` counts as expected-state
 confirmation. `stop_compile` is the one destructive tool without a confirm value: it stops a
 running build and changes no content.
 
-In 0.5.x the old defaults still apply, and are deprecated: an upload that replaces something
-without these parameters, and a `sync_directory` without a `planToken`, still run, and their
-results list `deprecations`. From 0.6.0 they are refused; see
-[what changes in 0.6.0](#what-changes-in-060).
+These were the defaults 0.5.x announced and 0.6.0 enforces; see
+[what changed in 0.6.0](#what-changed-in-060).
 
-**A folder sync with a `planToken` stops when either side moved.** `plan_sync` changes nothing
+**A folder sync needs a `planToken`, and stops when either side moved.** `plan_sync` changes nothing
 and returns a `planToken` that covers both sides: every entity in scope in the project, with its
 binary hash or document revision, and every file in the local folder. `sync_directory` with that
 token compares both sides again first and stops with `REMOTE_DRIFT`, changing nothing, if either
-one moved. Without a token it has nothing to compare against: it applies whatever it finds when
-it starts, and in mirror mode counts `confirmDeleteCount` against a delete list nobody has seen.
-Such a call reports `planned: false` and a deprecation; from 0.6.0 it is refused, except an
-additive sync that says so with `unplanned: true`. Just before each upload, a sync also checks
+one moved. Without a token it would have nothing to compare against, so it is refused with
+`CONFIRMATION_MISMATCH` (`details.missing: "planToken"`) before anything is read, except an
+additive sync that says so with `unplanned: true` and reports `planned: false`. A mirror sync
+always needs a token, so `confirmDeleteCount` is never counted against a delete list nobody has
+seen. Just before each upload, a sync also checks
 that a new path is still empty and a changed binary still has the hash it compared, so a file a
 collaborator replaced in between fails with `REMOTE_DRIFT` and every delete is withheld.
 A `planToken` records what `plan_sync` observed, not that a person approved it; the approval is
@@ -166,8 +168,10 @@ repeats this notice.
   not a zip archive, and with `REMOTE_ERROR`, retryable, when the archive lacks its zip end
   record. It replaces an existing file only by an atomic rename of a complete download.
 - `plan_sync` is read-only. `sync_directory` with a `planToken` fails with `REMOTE_DRIFT` before
-  any change when the project or the local folder differs from the plan. `unplanned: true` with a
-  `planToken` or in mirror mode is `INVALID_ARGUMENT` before anything is read. In mirror mode it
+  any change when the project or the local folder differs from the plan. Without a `planToken` or
+  `unplanned: true` it is `CONFIRMATION_MISMATCH` with `details.missing: "planToken"`, and
+  `unplanned: true` with a `planToken` or in mirror mode is `INVALID_ARGUMENT`, both before
+  anything is read. In mirror mode it
   requires `confirmDeleteCount` equal to the number of `remoteOnly` entries, else
   `CONFIRMATION_MISMATCH`; it runs deletes only after every upload and write succeeded and was
   confirmed in the tree, and re-checks each entity's identity just before deleting it.
@@ -186,7 +190,17 @@ repeats this notice.
 - An operation checks every effect it will use, a read after a write included, before it sends
   anything, so a `POLICY_DENIED` never follows a change.
 - Compiles use the account's compile allowance. `compile_project.timeoutMs` bounds only how long
-  the call waits.
+  the call waits, and a compile request that timed out is never retried, since the compile may
+  still be running.
+- `compile_project` passes on only `status`, output paths and types, build ids, numeric `stats`,
+  and a parsed summary of the logs; Overleaf's URLs, timings, and any other field are dropped.
+  A summary message is one error or warning line cut to 240 characters, never the source
+  excerpt after `l.<n>`. `builtCleanly` is never `true` without a log that was read.
+- `download_compile_output` and `get_compile_log` request output only from
+  `/project/<projectId>/build/<buildId>/output/<file>`, with `file` checked to be a relative path
+  without `..` before any request; a URL from Overleaf's response is never followed.
+  `download_compile_output` replaces an existing local file only with `overwrite: true`, by an
+  atomic rename. `get_compile_log` reads at most 1 MB.
 
 ## Error codes
 
@@ -199,35 +213,41 @@ Every failure is returned as JSON with `code`, `message`, `retryable`, and optio
 | `PERMISSION_DENIED` | Overleaf refused the operation for this account (HTTP 403). From `download_project_zip` it can also mean the session expired, since that route checks project access rather than the login. | Check the project's access level; read-only collaborators cannot write. For a project download, check `auth_status` too. |
 | `NOT_FOUND` | The project, path, or Overleaf resource does not exist (HTTP 404). | Re-read the tree; the entity may have been renamed or removed. |
 | `REVISION_CONFLICT` | The document changed since the revision you hold, or the verified result differs from the intent. `details.liveRevision` carries the current revision. | Read again, reconcile, and write with the new revision. |
-| `PROTOCOL_UNSUPPORTED` | The deployment speaks a collaboration protocol version this release does not, or the document's OT protocol changed between read and write, or a tracked write has no user id, or a project download was not a zip archive, or a response that should be JSON was not (`details.path`, and `details.contentType` when it names a media type). | Read again. If the protocol version is the issue, see `OVERLEAF_PROTOCOL_VERSIONS`. |
+| `PROTOCOL_UNSUPPORTED` | The deployment speaks a collaboration protocol version this release does not, or the document's OT protocol changed between read and write, or a tracked write has no user id, or a project download was not a zip archive, or a downloaded `.pdf` was not a PDF, or a response that should be JSON was not (`details.path`, and `details.contentType` when it names a media type), or a compile response lacked its expected keys (`details` `{ endpoint, expectedKeys, receivedKeys }`). | Read again. If the protocol version is the issue, see `OVERLEAF_PROTOCOL_VERSIONS`. |
 | `DOC_TOO_LARGE` | The resulting document would reach the advertised maximum length. | Split the content across documents. |
 | `UPDATE_TOO_LARGE` | The serialized edit exceeds the configured update limit, or Overleaf answered HTTP 413. | Split the change into smaller writes, each with a fresh revision. |
 | `TIMEOUT` | A request or OT application timed out. For writes, `details.outcome: "not_applied"` means the original revision stayed live throughout the recovery window. In a `batch_upload` result, the path was as before the upload when the tree was read back; the upload could still land late. | Safe to read and try again with a fresh revision. |
 | `OUTCOME_UNKNOWN` | A write timed out and the live document could not be observed afterwards, or a timed-out `batch_upload` entry whose path the tree read back cannot settle either way. | Read the document, or `get_project_tree`, before doing anything else; do not assume either outcome. |
-| `COMPILE_FAILED` | Overleaf finished the compile with a status other than success. `details` is `{ status, rootFilePath, result: { status } }`; `status` is `unrecognized` when Overleaf's was not a short identifier. `details.result` is deprecated and goes in 0.6.0. | Inspect the status; fix LaTeX errors or wait if the account was rate-limited. |
+| `COMPILE_FAILED` | Overleaf ended the compile with no build to report on: `terminated`, `exited`, `project-too-large`, `validation-problems`, or a status this server does not know. A LaTeX error is not this: that build returns a summary. `details` is `{ status, rootFilePath, buildId?, buildRef? }`; `status` is `unrecognized` when Overleaf's was not a short identifier. | Inspect the status; with a `buildRef`, read the log with `get_compile_log`. |
+| `COMPILE_RATE_LIMITED` | Overleaf did not run the compile: `too-recently-compiled`, `rate-limited`, `autocompile-backoff`, `compile-in-progress`, or HTTP 429. `details` as for `COMPILE_FAILED`, plus `retryAfterMs` when known. | Wait `retryAfterMs`, or a little while, then compile once more. |
+| `COMPILE_UNAVAILABLE` | Overleaf's compile service is down for maintenance or unavailable. | Try again later. |
+| `COMPILE_TIMEOUT` | The build reached Overleaf's time limit for the account. `details.buildRef`, when present, reaches its partial log. | Do not just compile again: try `draft` or `stopOnFirstError`, or simplify the document. |
+| `NO_BUILD` | `get_compile_log`, `download_compile_output`, or a compile output resource was called without a `buildRef`, and this server process has not compiled the project. | Call `compile_project` first, or pass the `buildRef` an earlier compile returned. |
+| `BUILD_NOT_FOUND` | Overleaf no longer keeps the build's output (`details.buildId`, `details.file`). | Compile again. |
 | `PARTIAL_CLEANUP` | A multi-step operation applied some steps and could not undo them all. `details` says what remains. | Inspect the project and finish the cleanup by hand. |
-| `INVALID_ARGUMENT` | The call was malformed, a path was invalid, an entity had the wrong type, Overleaf rejected a name, or an id held a character that is not path-safe (`details.parameter`). `details.overleafError` may carry Overleaf's short reason code. | Fix the arguments. |
-| `CONFIRMATION_MISMATCH` | A confirm-by-value parameter (`confirmPath`, `confirmName`, `confirmCount`, `confirmDeleteCount`) did not equal the value it must repeat exactly, or mirror mode was called without `confirmDeleteCount`, or `download_project_zip` found a file at `localPath` without `overwrite: true`, or `upload_file` was given `overwrite: false` for a path that holds a document or binary file. Nothing was changed. | Re-read the path, name, or plan and pass the value back verbatim, after confirming with the user. |
+| `INVALID_ARGUMENT` | The call was malformed, a path was invalid, an entity had the wrong type, Overleaf rejected a name, an id held a character that is not path-safe (`details.parameter`), or an upload would replace a text document without `uncheckedDocumentReplace: true` (`details.missing`). `details.overleafError` may carry Overleaf's short reason code. | Fix the arguments; to replace a document, prefer `write_file` with `localPath`. |
+| `CONFIRMATION_MISMATCH` | A confirm-by-value parameter (`confirmPath`, `confirmName`, `confirmCount`, `confirmDeleteCount`) did not equal the value it must repeat exactly, or mirror mode was called without `confirmDeleteCount`, or `download_project_zip` or `download_compile_output` found a file at `localPath` without `overwrite: true`, or `upload_file` was given `overwrite: false` for a path that holds a document or binary file, or would replace a binary without `overwrite: true` or `expectedHash`, or `batch_upload` found taken destinations with `onConflict` left at `fail`, or `sync_directory` had no `planToken` (`details.missing` names the parameter to pass). Nothing was changed. | Re-read the path, name, or plan and pass the value back verbatim, after confirming with the user. |
 | `RATE_LIMITED` | Overleaf answered HTTP 429, most often on project creation, zip import, project download, or uploads. `details.retryAfterMs` carries Overleaf's hint when it sent one; the project download sends none. Nothing was applied by that request, and `batch_upload` stops there. | Wait at least `retryAfterMs`, or a minute when it is absent (uploads are counted over 15 minutes, so a batch may need longer), then try once more. |
 | `REMOTE_DRIFT` | The project, or the local folder, changed since the `planToken` was issued (`details.changed` is `remote`, `local`, or `both`), or an entity planned for deletion, or a path a sync was about to upload to, changed just before, or an upload's `expectedHash` no longer matches. Nothing was changed by that step. | Run `plan_sync` again, or read `get_project_tree` again, and review the change with the user. |
 | `PATH_OUTSIDE_ROOT` | A local path is outside what the server may touch, nothing done. `details.kind` says why: `outside_folder` for a symbolic link or `.olignore` in `localFolderPath` that leads outside it, `outside_read_roots` or `outside_write_roots` for a path outside `OVERLEAF_LOCAL_READ_ROOTS` or `OVERLEAF_LOCAL_WRITE_ROOTS`, and `session_files` for a download onto the saved session. | Use a path inside the allowed folders, remove the link, or exclude it with an `ignore` pattern. |
 | `POLICY_DENIED` | The access policy does not allow this project (`OVERLEAF_ALLOWED_PROJECTS`, `details.parameter`) or this effect (`OVERLEAF_ALLOWED_EFFECTS`, `details.effect`). Nothing was sent. | Do not work around it; ask the person who configured the server. |
 | `REMOTE_ERROR` | Anything else Overleaf returned or a network failure, including a project download cut short before its zip end record, or a redirect answering a request that changes something. `details.status` carries the HTTP status when there is one, and `details.reason` an identifier for a socket error. | Retry once if `retryable` is `true`; otherwise report it. |
 
-## What changes in 0.6.0
+## What changed in 0.6.0
 
-Each of these still works in 0.5.x and reports a `deprecations` entry
-`{ parameter, message, enforcedIn: "0.6.0" }`; from 0.6.0 the same call is refused with nothing
-sent. New interfaces, such as the command line in 0.7.0, start with the 0.6.0 behaviour.
+0.5.x announced each of these with a `deprecations` entry `{ parameter, message, enforcedIn:
+"0.6.0" }` in the result, and still ran the call. From 0.6.0 the same call is refused with nothing
+sent, and no result lists `deprecations`. New interfaces, such as the command line in 0.7.0,
+start with this behaviour.
 
 | Behaviour | 0.5.x | 0.6.0 |
 | --- | --- | --- |
-| `sync_directory` without `planToken` | runs, `planned: false`, deprecation for `planToken` | `CONFIRMATION_MISMATCH`, `details.missing: "planToken"`; an additive sync may pass `unplanned: true` instead |
-| `upload_file` onto a binary, `overwrite` omitted and no `expectedHash` | replaces, deprecation for `overwrite`; an explicit `overwrite: false` already refuses | `CONFIRMATION_MISMATCH` |
+| `sync_directory` without `planToken` | runs, `planned: false`, deprecation for `planToken` | `CONFIRMATION_MISMATCH`, `details.missing: "planToken"`, before anything is read; an additive sync may pass `unplanned: true` instead |
+| `upload_file` onto a binary, `overwrite` omitted and no `expectedHash` | replaces, deprecation for `overwrite`; an explicit `overwrite: false` already refuses | `CONFIRMATION_MISMATCH`, `details.missing: "overwrite"` |
 | `upload_file` onto a text document without `uncheckedDocumentReplace` | replaces, deprecation for `uncheckedDocumentReplace` | `INVALID_ARGUMENT`, naming `write_file` with `localPath` |
-| `batch_upload` replacing something with `onConflict` omitted | replaces, deprecation for `onConflict` | no default replaces anything |
-| `batch_upload` replacing a text document without `uncheckedDocumentReplace` | replaces, deprecation for `uncheckedDocumentReplace` | refused for that file |
-| `COMPILE_FAILED` `details.result` | `{ status }` only | removed |
+| `batch_upload` replacing something with `onConflict` omitted | replaces, deprecation for `onConflict` | `onConflict` defaults to `fail`: the call is refused with `CONFIRMATION_MISMATCH` before any upload |
+| `batch_upload` replacing a text document without `uncheckedDocumentReplace` | replaces, deprecation for `uncheckedDocumentReplace` | refused for that file with `INVALID_ARGUMENT` |
+| `compile_project` on a LaTeX failure | `COMPILE_FAILED`, the status repeated in a nested detail | a result with the summary; compile error details are only `{ status, rootFilePath, buildId?, buildRef? }` |
 
 ## The access policy is not a sandbox
 
@@ -268,12 +288,12 @@ client's tool-argument budget. `localPath` exists for that reason.
 - **Terms of Service.** This is an unofficial client of private APIs. Overleaf may change them
   without notice or object to automation. Use a disposable project first, keep volume low, and
   read Overleaf's current terms.
-- **Blind uploads.** `upload_file` with `uncheckedDocumentReplace`, `batch_upload` with
-  `onConflict: "overwrite"`, and in 0.5.x either one relying on its deprecated default, overwrite
-  a collaborator's concurrent edits; use `write_file` for text when others may be editing.
+- **Blind uploads.** `upload_file` with `uncheckedDocumentReplace`, and `batch_upload` with
+  `onConflict: "overwrite"` and `uncheckedDocumentReplace`, overwrite a collaborator's concurrent
+  edits; use `write_file` for text when others may be editing.
   `expectedHash` narrows the window for a binary but does not close it. `sync_directory` writes documents with revision checks,
   but replaces binaries by upload: its only protection for those is the `planToken` check before
-  it starts. A sync run without a `planToken` has no such check.
+  it starts. An additive sync run with `unplanned: true` has no such check.
 - **Files Overleaf leaves out of an archive.** `download_project_zip` checks that the archive
   arrived whole, not that it holds every file. Overleaf builds the archive while sending it, and
   a file it fails to read is left out of an otherwise well-formed archive, logged only on

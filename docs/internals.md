@@ -37,8 +37,8 @@ Every operation is defined once and reached through one engine, whichever interf
 
 The engine is published without MCP as `overleaf-web-mcp/core`, which exports `OverleafRuntime`,
 `readConfig`, `createOverleafService`, `McpError`, `ERROR_CODES`, and the contract types, and
-never loads the MCP SDK. Until v0.7.0 documents its stable surface, it follows the same 0.5.x
-deprecations as the MCP server.
+never loads the MCP SDK. It enforces the same defaults as the MCP server; v0.7.0 documents its
+stable surface.
 
 ```ts
 import { createOverleafService, OverleafRuntime, readConfig } from 'overleaf-web-mcp/core'
@@ -132,7 +132,7 @@ revision checks entirely. Web-session peers such as `@netique/overleaf-mcp` shar
 connection model and also offer tracked changes; what sets this project apart is the project
 lifecycle tools, the verified-write guarantees described above, and folder sync that, given the
 `planToken` from `plan_sync`, stops when either side drifted from the plan. The
-[roadmap](roadmap.md) plans compile-log and PDF access, a command line and a TypeScript client
+[roadmap](roadmap.md) plans a command line and a TypeScript client
 over the same engine `overleaf-web-mcp/core` already exposes, tracked-change review, and
 multi-file documents.
 

@@ -161,10 +161,9 @@ To remove several entities without a sync, `delete_entities` takes a list of pat
 
 To upload a list of files to paths you choose, without comparing folders, `batch_upload` takes
 `{ localPath, destinationPath }` pairs, where `destinationPath` includes the file name. It checks
-every entry before sending anything and creates missing folders. Pass `onConflict`:
-`"overwrite"` replaces a binary file at a path, and `"skip"` leaves existing files alone; left
-out, it still overwrites in 0.5.x, with a deprecation in the result, and from 0.6.0 nothing is
-replaced by default. Replacing a text document this way has no revision check and also needs
+every entry before sending anything and creates missing folders. `onConflict` says what to do
+when a path is taken: `"fail"`, the default, refuses the whole call before anything is uploaded,
+`"overwrite"` replaces a binary file at a path, and `"skip"` leaves existing files alone. Replacing a text document this way has no revision check and also needs
 `uncheckedDocumentReplace: true`, so for documents a collaborator may be editing, a sync or
 `write_file` is the safer route. `upload_file` follows the same rules for one file, with
 `overwrite: true`, or `expectedHash` from `get_project_tree`, for a binary. A file that fails does not undo the ones before it; the
@@ -179,8 +178,32 @@ The hash in `get_project_tree` is still there for a quick manual check of one bi
 
 `compile_project` with no `rootFilePath` builds the root document configured in the project,
 which is what the web editor's Recompile button builds. Passing `rootFilePath` overrides the root
-for that call only. `stop_compile` stops a running build. Compiles use your account's compile
-allowance, so the assistant should not compile in a loop.
+for that call only. The result's `summary` says whether the paper built cleanly and lists the
+first errors and warnings by file and line, with undefined references and citations and missing
+files. Overleaf reports `status: "success"` whenever a PDF came out, even when LaTeX hit errors,
+so `summary.builtCleanly` is the answer to "did it build?".
+
+```json
+{
+  "status": "success",
+  "buildRef": "opaque-token-naming-this-build",
+  "summary": {
+    "builtCleanly": false,
+    "errorCount": 1,
+    "errors": [{ "file": "main.tex", "line": 5, "message": "Undefined control sequence." }],
+    "undefinedCitations": ["knuth84"],
+    "pageCount": 12
+  }
+}
+```
+
+For more context, `get_compile_log` returns the end of the LaTeX log, or only its error lines,
+without compiling again, and `download_compile_output` saves the PDF, or any other output such as
+`output.synctex.gz`, to a local path. Both take the `buildRef` and default to the latest build in
+this server process. `stopOnFirstError` gives a short log with the one error that matters, and
+`draft` skips images for faster text-only builds. `stop_compile` stops a running build. Compiles
+use your account's compile allowance, so the assistant should read the summary rather than
+compile in a loop.
 
 ### Reviewing comments
 

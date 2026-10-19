@@ -1,12 +1,13 @@
 # Tool reference
 
-The server registers 29 tools. Names are `snake_case`. Every tool except `auth_status`,
+The server registers 31 tools. Names are `snake_case`. Every tool except `auth_status`,
 `list_projects`, `create_project`, and `import_project_zip` takes a `projectId` from
 `list_projects` or from one of the tools that create a project. An id never contains `/`, `\`,
 `.`, `?`, `#`, or `%`; one that does is refused with `INVALID_ARGUMENT` before anything is sent.
 Results are JSON; `auth_status`, `list_projects`, the project lifecycle tools, `upload_file`,
-`batch_upload`, `download_project_zip`, and the folder sync tools also declare an `outputSchema`
-and return the same object as `structuredContent`. Failures are JSON with `code`, `message`,
+`batch_upload`, `download_project_zip`, the folder sync tools, and the compilation tools other
+than `stop_compile` also declare an `outputSchema` and return the same object as
+`structuredContent`. Failures are JSON with `code`, `message`,
 `retryable`, and optional `details`; the codes are listed in the
 [safety model](safety.md#error-codes). The Overleaf routes behind each tool are catalogued in the
 [private API page](private-api.md).
@@ -17,11 +18,12 @@ the server's disk. Clients may use these to decide when to ask the user. When th
 [access policy](configuration.md#access-policy) is configured, any tool can be refused with
 `POLICY_DENIED` or `PATH_OUTSIDE_ROOT` before anything is sent.
 
-**Deprecations.** Release 0.6.0 tightens three defaults: an upload that replaces something without
-saying so, a folder sync without a `planToken`, and `batch_upload` without an explicit
-`onConflict`. In 0.5.x such a call still does what it did before, and its result carries
-`deprecations`, a list of `{ parameter, message, enforcedIn: "0.6.0" }` naming what to pass from
-now on. The [safety model](safety.md#what-changes-in-060) lists each one.
+**Replacements must be asked for.** Since 0.6.0 an upload that would replace something, a folder
+sync without a `planToken`, and a `batch_upload` onto taken paths are refused with nothing sent
+unless the call says so: `overwrite` or `expectedHash` for a binary, `uncheckedDocumentReplace`
+for a text document, `onConflict` for a batch, and `planToken` or `unplanned` for a sync. 0.5.x
+announced these with a `deprecations` list in the result; the
+[safety model](safety.md#what-changed-in-060) lists what changed.
 
 ## Account and projects
 
@@ -225,12 +227,12 @@ Upload a local file into a project folder.
 | `localPath` | yes | Local file to upload |
 | `destinationFolderPath` | no | Target folder; default `""`, the project root |
 | `destinationName` | no | Name to store the file under; defaults to the local file name |
-| `overwrite` | no | `true` allows replacing a binary file at the path; `false` refuses to replace anything. Omitted, replacing a binary is deprecated, and refused from 0.6.0; a document is governed by `uncheckedDocumentReplace` |
+| `overwrite` | no | `true` allows replacing a binary file at the path; `false` refuses to replace anything. Omitted, replacing a binary needs `expectedHash`; a document is governed by `uncheckedDocumentReplace` |
 | `expectedHash` | no | The `hash` `get_project_tree` reported for the binary file being replaced, 40 lowercase hex characters |
 | `uncheckedDocumentReplace` | no | Allow replacing a text document, which has no revision check |
 
-If an entity already exists at the destination path, Overleaf replaces it; otherwise a new entity
-is created. A text document replaced by a text document keeps its entity id. A replaced binary
+If an entity already exists at the destination path and the call asks for it to be replaced,
+Overleaf replaces it; otherwise a new entity is created. A text document replaced by a text document keeps its entity id. A replaced binary
 file may get a new one, as may a document replaced by a binary or the reverse (Overleaf's source
 creates a new entity in those cases), so look the id up again in `get_project_tree` rather than
 reusing the old one. Overleaf, not the caller, decides whether the result is a text `doc` or a
@@ -240,14 +242,16 @@ and `.bst` documents from disk.
 What is at the path decides what the call needs, and every check runs inside the upload's queue
 job, after a fresh look at the tree and before anything is sent:
 
-| At the path | 0.5.x | From 0.6.0 |
-| --- | --- | --- |
-| nothing | uploaded | uploaded |
-| a binary file, with `overwrite: true` or a matching `expectedHash` | replaced | replaced |
-| a binary file, `overwrite` omitted | replaced, with a `deprecations` entry for `overwrite` | `CONFIRMATION_MISMATCH` |
-| a text document, with `uncheckedDocumentReplace: true` | replaced | replaced |
-| a text document, without it | replaced, with a `deprecations` entry for `uncheckedDocumentReplace` | `INVALID_ARGUMENT`, naming `write_file` with `localPath` |
-| a text document or binary file, with `overwrite: false` | `CONFIRMATION_MISMATCH`, nothing sent | the same |
+| At the path | Result |
+| --- | --- |
+| nothing | uploaded |
+| a binary file, with `overwrite: true` or a matching `expectedHash` | replaced |
+| a binary file, with neither | `CONFIRMATION_MISMATCH` (`details.missing: "overwrite"`), nothing sent |
+| a text document, with `uncheckedDocumentReplace: true` | replaced |
+| a text document, without it | `INVALID_ARGUMENT` (`details.missing: "uncheckedDocumentReplace"`), naming `write_file` with `localPath`, nothing sent |
+| a text document or binary file, with `overwrite: false` | `CONFIRMATION_MISMATCH`, nothing sent |
+
+In 0.5.x the two refused rows still replaced the file and listed a `deprecations` entry.
 
 An `expectedHash` that does not match what is at the path, nothing and a text document included,
 fails with `REMOTE_DRIFT` and nothing is sent. It is a preflight, not a compare-and-swap: the
@@ -264,8 +268,7 @@ the destination folder fails the upload with `INVALID_ARGUMENT` (`details.overle
 
 Returns `entityId`, `entityType`, `path`, `replaced` (whether something existed at that path),
 for binary files `hash`, computed locally so it can be checked against `get_project_tree` later,
-`trackChangesActive`, `writeMode`, and `deprecations` when the call relied on a default 0.6.0
-removes. `writeMode` is `tracked` when a text document replaced a text document while track
+`trackChangesActive`, and `writeMode`. `writeMode` is `tracked` when a text document replaced a text document while track
 changes is on for this account, because Overleaf then records the difference as tracked changes,
 and `untracked` otherwise: for a binary, a new file, or with track changes off.
 
@@ -277,7 +280,7 @@ Upload a list of local files, each to its own project path, in one call.
 | --- | :---: | --- |
 | `projectId` | yes | Project id |
 | `files` | yes | 1 to 500 entries `{ localPath, destinationPath }`. `destinationPath` is the full project path, file name included, such as `figures/fig1.pdf` |
-| `onConflict` | no | `overwrite` replaces a binary file at a path, as `upload_file` with `overwrite: true` does; `skip` leaves what is there alone and lists it under `skipped`. Omitted, it overwrites; from 0.6.0 no default replaces anything |
+| `onConflict` | no | What to do when a document or binary file is already at a destination path. `fail`, the default, refuses the whole call before anything is uploaded; `skip` leaves what is there alone and lists it under `skipped`; `overwrite` replaces a binary file, as `upload_file` with `overwrite: true` does |
 | `uncheckedDocumentReplace` | no | Allow replacing text documents, which has no revision check |
 | `stopOnError` | no | Stop at the first failure instead of continuing; default `false` |
 
@@ -289,9 +292,12 @@ in order:
    one with a `..` segment, a `destinationPath` listed twice, and one that is the parent folder of another
    listed path are `INVALID_ARGUMENT`; a `localPath` that does not exist is `NOT_FOUND`, and one
    that is a folder is `INVALID_ARGUMENT`. Any of these fails the whole call with nothing changed.
-2. The project tree is read once. A file whose path runs through a document or binary file, or
-   whose path is a folder, fails with `INVALID_ARGUMENT` in either mode. A file whose path holds a
-   document or binary file is skipped with `onConflict: "skip"`, and otherwise replaced, as by
+2. The project tree is read once. With `onConflict: "fail"`, the default, any destination path
+   that holds a document or binary file fails the whole call with `CONFIRMATION_MISMATCH`
+   (`details.missing: "onConflict"`, `details.count`, and up to 25 `details.paths`) and nothing
+   is uploaded. A file whose path runs through a document or binary file, or whose path is a
+   folder, fails with `INVALID_ARGUMENT` in any mode. A file whose path holds a document or binary
+   file is skipped with `onConflict: "skip"`, and replaced with `"overwrite"`, as by
    `upload_file`: a replaced document keeps its entity id, a replaced binary may get a new one.
 3. Files are handled in the order given, one at a time through the project's queue. Just before a
    file is uploaded, its missing parent folders are created, parents first, each once, and listed
@@ -320,8 +326,10 @@ Replacing a document this way is a blind write with no revision check, so a coll
 concurrent edit is lost; Overleaf records the replacement as tracked changes only when track
 changes is already on for this account. For documents someone may be editing, use `write_file`
 with `localPath`, or `plan_sync` and `sync_directory`. Each file goes through `upload_file`'s
-checks: a replaced document without `uncheckedDocumentReplace: true`, and any replacement with
-`onConflict` omitted, are listed in `deprecations`, and refused from 0.6.0.
+checks: with `onConflict: "overwrite"`, a document is replaced only with
+`uncheckedDocumentReplace: true`, and otherwise that file fails with `INVALID_ARGUMENT` and
+nothing is sent for it. In 0.5.x an omitted `onConflict` overwrote, and the result listed
+`deprecations`.
 
 Returns:
 
@@ -338,7 +346,6 @@ Returns:
 - `verified`: `true` when the tree was read back and every completed upload was confirmed in it,
   or when nothing was attempted; `false` when the read-back failed, in which case the entries are
   as the uploads reported them.
-- `deprecations`, when a replacement relied on a default 0.6.0 removes.
 
 Nothing is retried. A client that sends a progress token receives `notifications/progress` as
 each file is uploaded.
@@ -520,7 +527,7 @@ Make a project folder match a local folder.
 | `localFolderPath` | yes | Local folder on the server's disk |
 | `mode` | yes | `additive` uploads and writes only; `mirror` also deletes what exists only in the project |
 | `destinationFolderPath` | no | As for `plan_sync`; default `""` |
-| `planToken` | no | From `plan_sync`, or from a partial `sync_directory` to resume it. Omitting it is deprecated; from 0.6.0 it is required unless `unplanned` is set |
+| `planToken` | unless `unplanned` | From `plan_sync`, or from a partial `sync_directory` to resume it |
 | `unplanned` | no | `true` runs an additive sync without a `planToken` on purpose; refused with a `planToken` or in mirror mode |
 | `confirmDeleteCount` | for `mirror` | The number of entries in `plan_sync`'s `remoteOnly`, each folder counting once |
 | `ignore` | no | As for `plan_sync`; must match the plan's when a `planToken` is given |
@@ -529,11 +536,11 @@ Make a project folder match a local folder.
 
 What happens, in order:
 
-1. `unplanned: true` with a `planToken`, or in mirror mode, is `INVALID_ARGUMENT` before anything
-   is read. The folder and the project are then compared again, exactly as `plan_sync` does.
-   Without a `planToken` there is nothing to compare them with, so the sync applies what it finds
-   now; that is deprecated and refused from 0.6.0 unless an additive sync passes `unplanned: true`.
-   With a `planToken`, a sync whose project side or local side differs from the plan fails with
+1. Before anything is read: `unplanned: true` with a `planToken`, or in mirror mode, is
+   `INVALID_ARGUMENT`, and a call with neither a `planToken` nor `unplanned: true` is
+   `CONFIRMATION_MISMATCH` with `details.missing: "planToken"`. The folder and the project are
+   then compared again, exactly as `plan_sync` does. With `unplanned: true` there is no plan to
+   compare them with, so the additive sync applies what it finds now. With a `planToken`, a sync whose project side or local side differs from the plan fails with
    `REMOTE_DRIFT` and changes nothing; `details.changed` is `remote`, `local`, or `both`. The
    token covers every entity in scope, identical ones included, so a collaborator's edit to a
    file the plan called identical stops the sync instead of being overwritten. A token issued
@@ -563,7 +570,7 @@ Nothing is retried automatically. Returns `status` (`complete`, or `partial` whe
 or was not attempted), `mode`, `completed` (`{ destinationPath, action, entityId? }`), `failed`
 (`{ destinationPath, action, errorCode, message }`), `remaining` (`{ destinationPath, action }`,
 what was not attempted), `identicalCount`, `planToken`, `planned` (whether the call was checked
-against a `planToken`), and `deprecations` for a call without a `planToken` or `unplanned: true`.
+against a `planToken`; `false` only with `unplanned: true`).
 `action` is `create_folder`, `upload`, `write`, `create`, or `delete`.
 
 The returned `planToken` describes the state this sync left: what it changed as the project now
@@ -642,22 +649,55 @@ Returns the same fields as `write_file`. Fails with `REVISION_CONFLICT` if the d
 
 ### `compile_project`
 
-Compile the project.
+Compile the project and report on the build from its logs.
 
 | Parameter | Required | Meaning |
 | --- | :---: | --- |
 | `projectId` | yes | Project id |
 | `rootFilePath` | no | Document to compile for this call only. Omitted, the root document configured in Overleaf is used, the same one the web editor's Recompile button builds |
 | `timeoutMs` | no | How long to wait, 1 second to 15 minutes; default 120 seconds |
+| `stopOnFirstError` | no | Stop at the first LaTeX error, for a short log holding the one error that matters |
+| `draft` | no | Draft mode: images become boxes, for faster text-only builds |
 
-Returns Overleaf's compile response: `status`, `outputFiles` (each with `path`, `url`, `type`, and
-`build`), `rootFilePath` (the document actually compiled), and further fields Overleaf includes
-such as `stats` and `timings`. A status other than `success` fails with `COMPILE_FAILED`, with
-`details` `{ status, rootFilePath, result: { status } }`; a status that is not a short lowercase
-identifier is reported as `unrecognized`. `details.result` is deprecated and goes in 0.6.0, when
-a failed build returns a parsed summary instead. A project with no configured root and no `rootFilePath`
-fails with `INVALID_ARGUMENT`. Compiles use the account's compile allowance; `timeoutMs` bounds
-only the wait.
+Check `summary.builtCleanly`, not `status`. Overleaf compiles in nonstopmode and reports `success`
+whenever a PDF came out, even when LaTeX hit errors on the way. `builtCleanly` is `true` only when
+a PDF was produced, `output.log` was read, and it reports no error. After the build the server
+reads the log, at most 1 MB of it, and any `.blg` BibTeX logs, and returns:
+
+- `status`: Overleaf's own, `success`, `failure` (LaTeX stopped without a PDF), or
+  `stopped-on-first-error`.
+- `outputFiles`: `{ path, type, build? }` for each output; the URLs Overleaf sends are dropped,
+  since every output is fetched from the project's own route.
+- `stats`: Overleaf's counters, numbers only. `buildId` and `clsiServerId` when Overleaf sent them.
+- `rootFilePath`: the document actually compiled.
+- `buildRef`: an opaque token naming this build to `get_compile_log` and
+  `download_compile_output`, in this process or a later one.
+- `summary`: `{ status, builtCleanly, pdfProduced, logRead, errorCount, warningCount, errors,
+  warnings, undefinedReferences, undefinedCitations, missingFiles, pageCount?, pdfSizeBytes? }`.
+  `errors` and `warnings` hold the first 20 as `{ file?, line?, message }`; the counts cover all
+  of them. A message is the error or warning line alone, cut to 240 characters, and never the
+  source excerpt TeX prints after `l.<n>`. `logRead` is `false` when the build left no log or it
+  could not be read, and `builtCleanly` is then `false` too.
+
+A build that ran, `failure` included, is a result, not an error. A compile that produced no build
+to report on fails, with `details` exactly `{ status, rootFilePath, buildId?, buildRef? }`
+(plus `retryAfterMs` for `COMPILE_RATE_LIMITED` when known); a status that is not a short
+lowercase identifier is reported as `unrecognized`:
+
+| Overleaf status | Code | Retryable |
+| --- | --- | :---: |
+| `too-recently-compiled`, `rate-limited`, `autocompile-backoff`, `compile-in-progress`, or HTTP 429 | `COMPILE_RATE_LIMITED` | yes |
+| `clsi-maintenance`, `unavailable` | `COMPILE_UNAVAILABLE` | yes |
+| `timedout` | `COMPILE_TIMEOUT` | no |
+| anything else, `terminated`, `exited`, `project-too-large`, and `validation-problems` included | `COMPILE_FAILED` | no |
+
+A build that timed out or was terminated can still have left a log; its `details.buildRef` then
+reaches it through `get_compile_log`. A `TIMEOUT` on the compile request itself is not retryable,
+because Overleaf may still be compiling; wait, or call `stop_compile`, before compiling again. A
+response without a `status`, or with malformed `outputFiles`, is `PROTOCOL_UNSUPPORTED` with
+`details` `{ endpoint: "compile", expectedKeys, receivedKeys }`. A project with no configured root
+and no `rootFilePath` fails with `INVALID_ARGUMENT`. Compiles use the account's compile
+allowance; `timeoutMs` bounds only the wait.
 
 ### `stop_compile` <small>destructive</small>
 
@@ -668,6 +708,57 @@ Stop the active compile for a project.
 | `projectId` | yes | Project id |
 
 Returns `stopped: true`.
+
+### `get_compile_log` <small>read-only</small>
+
+Read a build's LaTeX or BibTeX log without compiling again.
+
+| Parameter | Required | Meaning |
+| --- | :---: | --- |
+| `projectId` | yes | Project id |
+| `buildRef` | no | From `compile_project`; default, the latest build `compile_project` made in this server process |
+| `kind` | no | `latex` (default), `output.log`; or `bibtex`, the build's `.blg` file |
+| `format` | no | `raw` (default), or `errors-only` for only the lines that start an error |
+| `tail` | no | How many lines to return, from the end; default 200, at most 2,000 |
+
+At most 1 MB of the log is read, from its start, as Overleaf's own editor does, and at most
+100,000 characters are returned. Returns `buildId`, `file`, `log`, `truncated` (whether anything
+of the log was left out), and `errorLines`, the first 100 lines that start an error as
+`{ line, text }` with 1-based line numbers, each cut to 240 characters. The log quotes source
+lines near each error; prefer `compile_project`'s `summary` when it is enough.
+
+Without a `buildRef` and with no compile in this process the call fails with `NO_BUILD`. A
+`buildRef` for another project is `INVALID_ARGUMENT`. A log the build did not produce is
+`NOT_FOUND`, and a build Overleaf no longer keeps is `BUILD_NOT_FOUND`: compile again.
+
+### `download_compile_output` <small>destructive</small>
+
+Save a build's PDF, or another output file, to a local path on the server's disk.
+
+| Parameter | Required | Meaning |
+| --- | :---: | --- |
+| `projectId` | yes | Project id |
+| `localPath` | yes | Local file to write; its folder must exist |
+| `file` | no | Output path in the build, such as `output.log`, `output.blg`, or `output.synctex.gz`; default `output.pdf` |
+| `buildRef` | no | From `compile_project`; default, the latest build in this server process |
+| `overwrite` | no | Replace `localPath` if it already exists; default `false` |
+
+`file` must be a relative path without `..`, `\`, or control characters, else `INVALID_ARGUMENT`
+before anything is requested. It is requested only from the project's own route,
+`/project/<projectId>/build/<buildId>/output/<file>`, never from a URL in Overleaf's response. An
+existing `localPath` without `overwrite: true` is `CONFIRMATION_MISMATCH` and nothing is
+downloaded; a replacement is atomic, so a failed download leaves the old file. A `.pdf` that does
+not start with `%PDF-` is `PROTOCOL_UNSUPPORTED` and nothing is written. `NO_BUILD`, `NOT_FOUND`,
+and `BUILD_NOT_FOUND` are as for `get_compile_log`. Returns the absolute `localPath`, `file`,
+`sizeBytes`, `buildId`, and `replaced`.
+
+### Compile output resources
+
+The server also offers two read-only MCP resources for the latest build of a project in this
+server process: `overleaf://project/{projectId}/output/output.log` (text, the first 1 MB) and
+`overleaf://project/{projectId}/output/output.pdf` (a PDF of at most 16 MB; use
+`download_compile_output` for a larger one). Reading one before the project was compiled fails
+with `NO_BUILD`.
 
 ## Review
 

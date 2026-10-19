@@ -70,8 +70,22 @@ import). Only a value matching `^[a-z][a-z0-9_]{0,63}$` is ever propagated, unde
 
 | Method and route | Sent | Read | Used by |
 | --- | --- | --- | --- |
-| `POST /project/:id/compile` | `{ rootDoc_id, check: "silent", incrementalCompilesEnabled: true }` | `status`, `outputFiles[]`, `stats`, and the rest of the response, passed through | `compile_project` |
+| `POST /project/:id/compile?file_line_errors=true` | `{ rootDoc_id, check: "silent", incrementalCompilesEnabled: true }`, plus `stopOnFirstError: true` and `draft: true` when asked | `status`; `outputFiles[]` reduced to `path`, `type`, and `build`; numeric `stats`; `clsiServerId`. Everything else, `url`, `timings`, and `pdfDownloadDomain` included, is dropped | `compile_project` |
+| `GET /project/:id/build/:buildId/output/:file` | `?clsiserverid=` when the compile response named one | the output file: `output.log` and `.blg` logs, at most 1 MB, for the summary and `get_compile_log`; any output for `download_compile_output` | `compile_project`, `get_compile_log`, `download_compile_output`, the compile output resources |
 | `POST /project/:id/compile/stop` | nothing | nothing | `stop_compile` |
+
+`file_line_errors` makes TeX run with `-file-line-error`, so each error names its file as
+`./path.tex:12: message`; the parser also reads the classic `! message` form with its `l.<n>`
+marker. Overleaf's compile statuses (from `CompileManager`, `ClsiManager`, and the editor's
+`local-compile-context`) are `success`, `failure`, `stopped-on-first-error`,
+`too-recently-compiled`, `rate-limited`, `autocompile-backoff`, `compile-in-progress`,
+`project-too-large`, `validation-problems`, `clsi-maintenance`, `unavailable`, `timedout`,
+`terminated`, and `exited`; the [tool reference](tools.md#compile_project) maps each to a result
+or an error code. The response carries no top-level build id: it is each output file's `build`,
+validated as Overleaf does (`^[0-9a-f]+-[0-9a-f]+$`), as is `clsiServerId` (`^[a-z0-9-]+$`). The
+output route is built from those and a checked file path, never from an output file's `url`,
+which on overleaf.com points at a separate download domain. Overleaf keeps build output only for
+a while; a 404 from the output route is `BUILD_NOT_FOUND`.
 
 ## Review
 
