@@ -23,20 +23,24 @@ const tree = [
   },
 ]
 
+// The shape Overleaf's /threads route sends: names and emails, and millisecond timestamps.
 const threads = {
   open: {
     messages: [
       {
         id: 'm1',
         content: 'Please revise',
-        timestamp: '2026-01-01T00:00:00.000Z',
+        timestamp: Date.UTC(2026, 0, 1),
         user_id: 'reviewer',
-        user: { id: 'reviewer', name: 'Reviewer', email: 'r@example.test' },
+        user: { id: 'reviewer', first_name: 'Ada', last_name: 'Lovelace', email: 'ada@example.test' },
       },
     ],
   },
   resolved: {
     resolved: true,
+    resolved_at: '2026-01-02T00:00:00.000Z',
+    resolved_by_user_id: 'owner',
+    resolved_by_user: { id: 'owner', first_name: 'Grace', last_name: 'Hopper', email: 'grace@example.test' },
     messages: [],
   },
 }
@@ -78,13 +82,15 @@ function historyDocument(resolved: boolean, version: number): JoinedDocument {
   }
 }
 
-function connectionHarness(documents: JoinedDocument[], submitError?: McpError) {
+// A fixture that is an Error is thrown by that join instead of returned.
+function connectionHarness(documents: Array<JoinedDocument | Error>, submitError?: McpError) {
   const connection = {
     queue: new FifoQueue(),
     getTree: () => tree,
-    joinDocument: vi.fn(async () => {
+    joinDocument: vi.fn(async (): Promise<JoinedDocument> => {
       const value = documents.shift()
       if (!value) throw new Error('no document fixture')
+      if (value instanceof Error) throw value
       return value
     }),
     leaveDocument: vi.fn(async () => undefined),
@@ -149,6 +155,65 @@ describe('review comments API', () => {
     expect(connection.joinDocument).toHaveBeenCalledWith('doc1')
   })
 
+  test('maps threads to authors with display names and never returns an email', async () => {
+    const http = {
+      getJson: vi.fn(async (path: string) => {
+        if (path.endsWith('/threads')) return threads
+        throw new McpError('NOT_FOUND', 'no ranges')
+      }),
+      postJson: vi.fn(),
+      deleteJson: vi.fn(),
+    }
+    const { connections } = connectionHarness([])
+    const api = new CommentsApi(http, connections)
+
+    const result = await api.listComments('project', { status: 'all' })
+
+    expect(result.threads).toEqual([
+      {
+        id: 'open',
+        status: 'open',
+        messages: [{
+          id: 'm1',
+          author: { id: 'reviewer', displayName: 'Ada Lovelace' },
+          content: 'Please revise',
+          timestamp: '2026-01-01T00:00:00.000Z',
+        }],
+        unlocated: true,
+      },
+      {
+        id: 'resolved',
+        status: 'resolved',
+        messages: [],
+        resolvedAt: '2026-01-02T00:00:00.000Z',
+        resolvedBy: { id: 'owner', displayName: 'Grace Hopper' },
+        unlocated: true,
+      },
+    ])
+    expect(JSON.stringify(result)).not.toContain('@example.test')
+  })
+
+  test('filters by an author display name and not by email', async () => {
+    const http = {
+      getJson: vi.fn(async (path: string) => {
+        if (path.endsWith('/threads')) return threads
+        throw new McpError('NOT_FOUND', 'no ranges')
+      }),
+      postJson: vi.fn(),
+      deleteJson: vi.fn(),
+    }
+    const { connections } = connectionHarness([])
+    const api = new CommentsApi(http, connections)
+
+    const byName = await api.listComments('project', { author: 'ada love' })
+    const byId = await api.listComments('project', { author: 'reviewer' })
+    const byEmail = await api.listComments('project', { author: 'ada@example' })
+
+    expect(byName.threads.map(thread => thread.id)).toEqual(['open'])
+    expect(byId.threads.map(thread => thread.id)).toEqual(['open'])
+    expect(byEmail.threads).toEqual([])
+  })
+
   test('does not join every document when the project range route is absent', async () => {
     const http = {
       getJson: vi.fn(async (path: string) => {
@@ -186,24 +251,96 @@ describe('review comments API', () => {
     expect(connection.leaveDocument).toHaveBeenCalledOnce()
   })
 
+  function reply(id: string, timestamp: number) {
+    return {
+      id,
+      content: 'My reply',
+      user_id: 'user',
+      user: { id: 'user', first_name: 'Ada', last_name: 'Lovelace', email: 'ada@example.test' },
+      timestamp,
+    }
+  }
+
+  test('returns the created reply message, not the whole thread', async () => {
+    const now = Date.UTC(2026, 0, 1)
+    const http = {
+      postJson: vi.fn(async () => undefined),
+      getJson: vi.fn()
+        .mockResolvedValueOnce(threads)
+        .mockResolvedValueOnce({
+          ...threads,
+          open: { messages: [...threads.open.messages, reply('m2', now)] },
+        }),
+      deleteJson: vi.fn(),
+    }
+    const { connections } = connectionHarness([])
+    const api = new CommentsApi(http, connections, { currentUserId: 'user', now: () => now })
+
+    const result = await api.replyToComment('project', 'open', 'My reply')
+
+    expect(http.postJson).toHaveBeenCalledWith('/project/project/thread/open/messages', { content: 'My reply' })
+    expect(result).toEqual({
+      threadId: 'open',
+      message: {
+        id: 'm2',
+        author: { id: 'user', displayName: 'Ada Lovelace' },
+        content: 'My reply',
+        timestamp: '2026-01-01T00:00:00.000Z',
+      },
+      trackChangesActive: false,
+      writeMode: 'untracked',
+    })
+  })
+
+  test('reads trackChangesActive before posting, so a failed project join posts no reply', async () => {
+    const http = {
+      postJson: vi.fn(async () => undefined),
+      getJson: vi.fn(async () => threads),
+      deleteJson: vi.fn(),
+    }
+    const connections = {
+      withConnection: vi.fn(async () => {
+        throw new McpError('REMOTE_ERROR', 'join cut off', {
+          retryable: true,
+          details: { reason: 'disconnected' },
+        })
+      }),
+      invalidate: vi.fn(async () => undefined),
+    }
+    const api = new CommentsApi(http, connections, { currentUserId: 'user' })
+
+    await expect(api.replyToComment('project', 'open', 'My reply')).rejects.toMatchObject({
+      code: 'REMOTE_ERROR',
+      retryable: true,
+    })
+    expect(http.postJson).not.toHaveBeenCalled()
+  })
+
+  test('refuses a reply to a thread that does not exist before posting anything', async () => {
+    const http = {
+      postJson: vi.fn(),
+      getJson: vi.fn(async () => threads),
+      deleteJson: vi.fn(),
+    }
+    const { connections } = connectionHarness([])
+    const api = new CommentsApi(http, connections, { currentUserId: 'user' })
+
+    await expect(api.replyToComment('project', 'missing', 'My reply')).rejects.toMatchObject({
+      code: 'NOT_FOUND',
+      details: { threadId: 'missing' },
+    })
+    expect(http.postJson).not.toHaveBeenCalled()
+  })
+
   test('recovers a timed-out reply by matching the current user, content, and time window', async () => {
     const now = Date.now()
     const http = {
       postJson: vi.fn(async () => {
         throw new McpError('TIMEOUT', 'request timed out')
       }),
-      getJson: vi.fn(async () => ({
-        open: {
-          messages: [
-            {
-              id: 'new-message',
-              content: 'My reply',
-              user_id: 'user',
-              timestamp: new Date(now + 1).toISOString(),
-            },
-          ],
-        },
-      })),
+      getJson: vi.fn()
+        .mockResolvedValueOnce({ open: { messages: [] } })
+        .mockResolvedValueOnce({ open: { messages: [reply('new-message', now + 1)] } }),
       deleteJson: vi.fn(),
     }
     const { connections } = connectionHarness([])
@@ -213,10 +350,30 @@ describe('review comments API', () => {
     })
 
     await expect(api.replyToComment('project', 'open', 'My reply')).resolves.toMatchObject({
+      message: { id: 'new-message', content: 'My reply' },
       recoveredAfterTimeout: true,
       trackChangesActive: false,
       writeMode: 'untracked',
     })
+  })
+
+  test('does not take an identical earlier reply as proof that a timed-out reply applied', async () => {
+    const now = Date.now()
+    const earlier = { open: { messages: [reply('earlier', now)] } }
+    const http = {
+      postJson: vi.fn(async () => {
+        throw new McpError('TIMEOUT', 'request timed out')
+      }),
+      getJson: vi.fn(async () => earlier),
+      deleteJson: vi.fn(),
+    }
+    const { connections } = connectionHarness([])
+    const api = new CommentsApi(http, connections, { currentUserId: 'user', now: () => now })
+
+    await expect(api.replyToComment('project', 'open', 'My reply')).rejects.toMatchObject({
+      code: 'OUTCOME_UNKNOWN',
+    })
+    expect(http.postJson).toHaveBeenCalledOnce()
   })
 
   test('creates a thread, attaches its range, and returns the verified revision', async () => {
@@ -226,7 +383,17 @@ describe('review comments API', () => {
     ])
     const { connection, connections } = connectionHarness([before, after])
     const http = {
-      getJson: vi.fn(async () => ({ thread: { messages: [] } })),
+      getJson: vi.fn(async () => ({
+        thread: {
+          messages: [{
+            id: 'message',
+            content: 'Review this',
+            timestamp: Date.UTC(2026, 0, 1),
+            user_id: 'user',
+            user: { id: 'user', first_name: 'Ada', last_name: 'Lovelace', email: 'ada@example.test' },
+          }],
+        },
+      })),
       postJson: vi.fn(async () => ({ id: 'message' })),
       deleteJson: vi.fn(async () => ({})),
     }
@@ -266,6 +433,16 @@ describe('review comments API', () => {
     )
     expect(result).toMatchObject({ threadId: 'thread', writeMode: 'untracked' })
     expect(result.revision).toEqual(expect.any(String))
+    expect(result.thread).toEqual({
+      id: 'thread',
+      status: 'open',
+      messages: [{
+        id: 'message',
+        author: { id: 'user', displayName: 'Ada Lovelace' },
+        content: 'Review this',
+        timestamp: '2026-01-01T00:00:00.000Z',
+      }],
+    })
   })
 
   test('polls for a late comment attachment before considering orphan cleanup', async () => {
@@ -308,6 +485,190 @@ describe('review comments API', () => {
     expect(http.deleteJson).not.toHaveBeenCalled()
   })
 
+  function addCommentInput() {
+    return {
+      projectId: 'project',
+      filePath: 'main.tex',
+      revision: createRevision({
+        projectId: 'project',
+        docId: 'doc1',
+        protocol: 'sharejs',
+        otVersion: 1,
+        content: 'hello',
+      }),
+      start: { line: 1, column: 2 },
+      end: { line: 1, column: 4 },
+      expectedText: 'el',
+      content: 'Review this',
+    }
+  }
+
+  test('observes an attachment whose socket failed after it was sent, and keeps the thread', async () => {
+    const attached = shareDocument('hello', 2, [{ op: { p: 1, c: 'el', t: 'thread' } }])
+    const { connection, connections } = connectionHarness(
+      [shareDocument('hello', 1), attached],
+      new McpError('OUTCOME_UNKNOWN', 'socket closed')
+    )
+    const http = {
+      getJson: vi.fn(async () => ({ thread: { messages: [] } })),
+      postJson: vi.fn(async () => ({ id: 'message' })),
+      deleteJson: vi.fn(async () => ({})),
+    }
+    const api = new CommentsApi(http, connections, {
+      threadIdFactory: () => 'thread',
+      recoveryTimeoutMs: 20,
+      recoveryPollIntervalMs: 0,
+    })
+
+    await expect(api.addComment(addCommentInput())).resolves.toMatchObject({
+      threadId: 'thread',
+      recoveredAfterTimeout: true,
+    })
+    expect(connections.invalidate).toHaveBeenCalledWith('project')
+    expect(connection.submitUpdate).toHaveBeenCalledOnce()
+    expect(http.postJson).toHaveBeenCalledOnce()
+    expect(http.deleteJson).not.toHaveBeenCalled()
+  })
+
+  test('reports an attachment cut off by a lost socket as not applied only after observing it absent', async () => {
+    const { connection, connections } = connectionHarness(
+      [shareDocument('hello', 1), ...Array.from({ length: 50 }, () => shareDocument('hello', 1))],
+      new McpError('OUTCOME_UNKNOWN', 'socket closed')
+    )
+    const http = {
+      getJson: vi.fn(async () => ({ thread: { messages: [] } })),
+      postJson: vi.fn(async () => ({ id: 'message' })),
+      deleteJson: vi.fn(async () => ({})),
+    }
+    const api = new CommentsApi(http, connections, {
+      threadIdFactory: () => 'thread',
+      recoveryTimeoutMs: 0,
+      recoveryPollIntervalMs: 0,
+    })
+
+    await expect(api.addComment(addCommentInput())).rejects.toMatchObject({
+      code: 'REMOTE_ERROR',
+      retryable: false,
+      details: { threadId: 'thread', outcome: 'not_applied' },
+    })
+    expect(connection.submitUpdate).toHaveBeenCalledOnce()
+    expect(http.deleteJson).toHaveBeenCalledOnce()
+  })
+
+  test('observes an applied attachment whose verification read lost the socket', async () => {
+    const lost = new McpError('REMOTE_ERROR', 'socket closed', {
+      retryable: true,
+      details: { event: 'joinDoc', reason: 'disconnected' },
+    })
+    const attached = shareDocument('hello', 2, [{ op: { p: 1, c: 'el', t: 'thread' } }])
+    const { connection, connections } = connectionHarness([shareDocument('hello', 1), lost, attached])
+    const http = {
+      getJson: vi.fn(async () => ({ thread: { messages: [] } })),
+      postJson: vi.fn(async () => ({ id: 'message' })),
+      deleteJson: vi.fn(async () => ({})),
+    }
+    const api = new CommentsApi(http, connections, {
+      threadIdFactory: () => 'thread',
+      recoveryTimeoutMs: 20,
+      recoveryPollIntervalMs: 0,
+    })
+
+    await expect(api.addComment(addCommentInput())).resolves.toMatchObject({
+      threadId: 'thread',
+      recoveredAfterTimeout: true,
+    })
+    expect(connections.invalidate).toHaveBeenCalledWith('project')
+    expect(connection.submitUpdate).toHaveBeenCalledOnce()
+    expect(http.postJson).toHaveBeenCalledOnce()
+    expect(http.deleteJson).not.toHaveBeenCalled()
+  })
+
+  test('never reports an applied attachment as retryable when it cannot be observed', async () => {
+    const lost = new McpError('REMOTE_ERROR', 'socket closed', {
+      retryable: true,
+      details: { event: 'joinDoc', reason: 'disconnected' },
+    })
+    const { connections } = connectionHarness([shareDocument('hello', 1), lost])
+    const http = {
+      getJson: vi.fn(async () => ({ thread: { messages: [] } })),
+      postJson: vi.fn(async () => ({ id: 'message' })),
+      deleteJson: vi.fn(async () => ({})),
+    }
+    const api = new CommentsApi(http, connections, {
+      threadIdFactory: () => 'thread',
+      recoveryTimeoutMs: 0,
+      recoveryPollIntervalMs: 0,
+    })
+
+    await expect(api.addComment(addCommentInput())).rejects.toMatchObject({
+      code: 'OUTCOME_UNKNOWN',
+      retryable: false,
+      details: { threadId: 'thread' },
+    })
+    expect(http.deleteJson).not.toHaveBeenCalled()
+  })
+
+  test('resolves a ShareJS thread anchored in the named document', async () => {
+    const anchored = [{ op: { p: 1, c: 'el', t: 'open' } }]
+    const { connections } = connectionHarness([
+      shareDocument('hello', 1, anchored),
+      shareDocument('hello', 1, anchored),
+    ])
+    const http = {
+      getJson: vi.fn(async () => ({ open: { ...threads.open, resolved: true } })),
+      postJson: vi.fn(async () => undefined),
+      deleteJson: vi.fn(),
+    }
+    const api = new CommentsApi(http, connections)
+    const revision = createRevision({
+      projectId: 'project',
+      docId: 'doc1',
+      protocol: 'sharejs',
+      otVersion: 1,
+      content: 'hello',
+    })
+
+    await expect(api.setCommentStatus({
+      projectId: 'project',
+      filePath: 'main.tex',
+      revision,
+      threadId: 'open',
+      status: 'resolved',
+    })).resolves.toMatchObject({ threadId: 'open', status: 'resolved' })
+    expect(http.postJson).toHaveBeenCalledWith('/project/project/doc/doc1/thread/open/resolve', {})
+  })
+
+  test.each<['sharejs' | 'history-ot', JoinedDocument]>([
+    ['sharejs', shareDocument('hello', 1)],
+    ['history-ot', { ...historyDocument(false, 1), rawSnapshot: { content: 'hello', comments: [], trackedChanges: [] } }],
+  ])('refuses a %s status change for a thread not anchored in filePath', async (protocol, document) => {
+    const { connection, connections } = connectionHarness([document])
+    const http = {
+      getJson: vi.fn(async () => threads),
+      postJson: vi.fn(),
+      deleteJson: vi.fn(),
+    }
+    const api = new CommentsApi(http, connections)
+    const revision = createRevision({
+      projectId: 'project',
+      docId: 'doc1',
+      protocol,
+      otVersion: 1,
+      content: 'hello',
+    })
+
+    await expect(api.setCommentStatus({
+      projectId: 'project',
+      filePath: 'main.tex',
+      revision,
+      threadId: 'open',
+      status: 'resolved',
+    })).rejects.toMatchObject({ code: 'NOT_FOUND', details: { threadId: 'open' } })
+    expect(http.postJson).not.toHaveBeenCalled()
+    expect(connection.submitUpdate).not.toHaveBeenCalled()
+    expect(connection.leaveDocument).toHaveBeenCalledWith('doc1')
+  })
+
   test('recovers a timed-out history-OT status update from the verified live state', async () => {
     const { connections } = connectionHarness(
       [historyDocument(false, 1), historyDocument(true, 2)],
@@ -340,5 +701,207 @@ describe('review comments API', () => {
       status: 'resolved',
       recoveredAfterTimeout: true,
     })
+  })
+
+  function statusInput(protocol: 'sharejs' | 'history-ot' = 'history-ot') {
+    return {
+      projectId: 'project',
+      filePath: 'main.tex',
+      revision: createRevision({
+        projectId: 'project',
+        docId: 'doc1',
+        protocol,
+        otVersion: 1,
+        content: 'hello',
+      }),
+      threadId: 'open',
+      status: 'resolved' as const,
+    }
+  }
+
+  test('observes an applied status change whose verification read lost the socket', async () => {
+    const lost = new McpError('REMOTE_ERROR', 'socket closed', {
+      retryable: true,
+      details: { event: 'joinDoc', reason: 'disconnected' },
+    })
+    const { connection, connections } = connectionHarness([
+      historyDocument(false, 1),
+      lost,
+      historyDocument(true, 2),
+    ])
+    const http = {
+      getJson: vi.fn(async () => threads),
+      postJson: vi.fn(),
+      deleteJson: vi.fn(),
+    }
+    const api = new CommentsApi(http, connections, {
+      recoveryTimeoutMs: 20,
+      recoveryPollIntervalMs: 0,
+    })
+
+    await expect(api.setCommentStatus(statusInput())).resolves.toMatchObject({
+      status: 'resolved',
+      recoveredAfterTimeout: true,
+    })
+    expect(connections.invalidate).toHaveBeenCalledWith('project')
+    expect(connection.submitUpdate).toHaveBeenCalledOnce()
+  })
+
+  // Its anchored text was deleted, so the snapshot keeps the comment with no range.
+  function rangelessHistoryDocument(resolved: boolean, version: number): JoinedDocument {
+    return {
+      ...historyDocument(resolved, version),
+      rawSnapshot: { content: 'hello', comments: [{ id: 'open', ranges: [], resolved }], trackedChanges: [] },
+    }
+  }
+
+  test.each<[string, McpError | undefined]>([
+    ['a confirmed', undefined],
+    ['a timed-out', new McpError('TIMEOUT', 'apply timeout')],
+  ])('verifies %s status change of a history-OT comment with no range from its snapshot', async (_, submitError) => {
+    const { connection, connections } = connectionHarness(
+      [rangelessHistoryDocument(false, 1), rangelessHistoryDocument(true, 2)],
+      submitError
+    )
+    // The REST thread still reads open: history-OT keeps the status in the snapshot.
+    const http = {
+      getJson: vi.fn(async () => threads),
+      postJson: vi.fn(),
+      deleteJson: vi.fn(),
+    }
+    const api = new CommentsApi(http, connections, {
+      recoveryTimeoutMs: 0,
+      recoveryPollIntervalMs: 0,
+    })
+
+    await expect(api.setCommentStatus(statusInput())).resolves.toMatchObject({
+      threadId: 'open',
+      status: 'resolved',
+    })
+    expect(connection.submitUpdate).toHaveBeenCalledOnce()
+    expect(http.postJson).not.toHaveBeenCalled()
+  })
+
+  test('reports a status change cut off by a lost socket as not applied, without retry', async () => {
+    const { connection, connections } = connectionHarness(
+      Array.from({ length: 50 }, () => historyDocument(false, 1)),
+      new McpError('OUTCOME_UNKNOWN', 'socket closed')
+    )
+    const http = {
+      getJson: vi.fn(async () => threads),
+      postJson: vi.fn(),
+      deleteJson: vi.fn(),
+    }
+    const api = new CommentsApi(http, connections, {
+      recoveryTimeoutMs: 0,
+      recoveryPollIntervalMs: 0,
+    })
+
+    await expect(api.setCommentStatus(statusInput())).rejects.toMatchObject({
+      code: 'REMOTE_ERROR',
+      retryable: false,
+      details: { threadId: 'open', outcome: 'not_applied' },
+    })
+    expect(connection.submitUpdate).toHaveBeenCalledOnce()
+  })
+
+  // Overleaf's Comment.toRaw writes resolved: true for a resolved comment and leaves the key out for an open one.
+  function overleafHistoryDocument(resolved: boolean, version: number, ranges: Array<{ pos: number; length: number }>): JoinedDocument {
+    return {
+      ...historyDocument(resolved, version),
+      rawSnapshot: {
+        content: 'hello',
+        comments: [{ id: 'open', ranges, ...(resolved ? { resolved: true } : {}) }],
+        trackedChanges: [],
+      },
+    }
+  }
+
+  test.each<[string, Array<{ pos: number; length: number }>, McpError | undefined]>([
+    ['a confirmed reopen of a comment with no range', [], undefined],
+    ['a timed-out reopen of a comment with no range', [], new McpError('TIMEOUT', 'apply timeout')],
+    ['a confirmed reopen of an anchored comment', [{ pos: 1, length: 2 }], undefined],
+    ['a timed-out reopen of an anchored comment', [{ pos: 1, length: 2 }], new McpError('TIMEOUT', 'apply timeout')],
+  ])('verifies %s from a history-OT snapshot that leaves resolved out', async (_, ranges, submitError) => {
+    const { connection, connections } = connectionHarness(
+      [overleafHistoryDocument(true, 1, ranges), overleafHistoryDocument(false, 2, ranges)],
+      submitError
+    )
+    // The REST thread still reads resolved: history-OT keeps the status in the snapshot.
+    const http = {
+      getJson: vi.fn(async () => ({ open: { ...threads.open, resolved: true } })),
+      postJson: vi.fn(),
+      deleteJson: vi.fn(),
+    }
+    const api = new CommentsApi(http, connections, {
+      recoveryTimeoutMs: 0,
+      recoveryPollIntervalMs: 0,
+    })
+
+    await expect(api.setCommentStatus({ ...statusInput(), status: 'open' })).resolves.toMatchObject({
+      threadId: 'open',
+      status: 'open',
+    })
+    expect(connection.submitUpdate).toHaveBeenCalledOnce()
+    expect(http.postJson).not.toHaveBeenCalled()
+  })
+
+  test.each<['sharejs' | 'history-ot', JoinedDocument]>([
+    ['sharejs', shareDocument('hello', 1, [{ op: { p: 1, c: 'el', t: 'open' } }])],
+    ['history-ot', historyDocument(false, 1)],
+  ])('never reports a confirmed %s status change as not applied when its verification read failed', async (protocol, document) => {
+    const lost = new McpError('REMOTE_ERROR', 'socket closed', {
+      retryable: true,
+      details: { event: 'joinDoc', reason: 'disconnected' },
+    })
+    // Every observation still shows the thread open, as if a collaborator reopened it meanwhile.
+    const { connection, connections } = connectionHarness([
+      document,
+      lost,
+      ...Array.from({ length: 50 }, () => document),
+    ])
+    const http = {
+      getJson: vi.fn(async () => threads),
+      postJson: vi.fn(async () => ({})),
+      deleteJson: vi.fn(),
+    }
+    const api = new CommentsApi(http, connections, {
+      recoveryTimeoutMs: 0,
+      recoveryPollIntervalMs: 0,
+    })
+
+    const error = await api.setCommentStatus(statusInput(protocol)).catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(McpError)
+    expect(error).toMatchObject({ code: 'OUTCOME_UNKNOWN', retryable: false, details: { threadId: 'open' } })
+    expect((error as McpError).details).not.toHaveProperty('outcome')
+    expect(connection.submitUpdate.mock.calls.length + http.postJson.mock.calls.length).toBe(1)
+  })
+
+  test('never cleans up or reports as not applied a confirmed attachment whose verification read failed', async () => {
+    const lost = new McpError('REMOTE_ERROR', 'socket closed', {
+      retryable: true,
+      details: { event: 'joinDoc', reason: 'disconnected' },
+    })
+    const { connection, connections } = connectionHarness([
+      shareDocument('hello', 1),
+      lost,
+      ...Array.from({ length: 50 }, () => shareDocument('hello', 1)),
+    ])
+    const http = {
+      getJson: vi.fn(async () => ({ thread: { messages: [] } })),
+      postJson: vi.fn(async () => ({ id: 'message' })),
+      deleteJson: vi.fn(async () => ({})),
+    }
+    const api = new CommentsApi(http, connections, {
+      threadIdFactory: () => 'thread',
+      recoveryTimeoutMs: 0,
+      recoveryPollIntervalMs: 0,
+    })
+
+    const error = await api.addComment(addCommentInput()).catch((caught: unknown) => caught)
+    expect(error).toMatchObject({ code: 'OUTCOME_UNKNOWN', retryable: false, details: { threadId: 'thread' } })
+    expect((error as McpError).details).not.toHaveProperty('outcome')
+    expect(connection.submitUpdate).toHaveBeenCalledOnce()
+    expect(http.deleteJson).not.toHaveBeenCalled()
   })
 })

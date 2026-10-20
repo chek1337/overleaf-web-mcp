@@ -131,6 +131,23 @@ const createdProjectSchema = z.object({
   url: z.string(),
 })
 
+const commentAuthorSchema = z.object({ id: z.string(), displayName: z.string() })
+
+const commentMessageSchema = z.object({
+  id: z.string().optional(),
+  author: commentAuthorSchema.nullable(),
+  content: z.string(),
+  timestamp: z.string().optional(),
+})
+
+const commentThreadSchema = z.object({
+  id: z.string(),
+  status: z.enum(['open', 'resolved']),
+  messages: z.array(commentMessageSchema),
+  resolvedAt: z.string().optional(),
+  resolvedBy: commentAuthorSchema.optional(),
+})
+
 const projectActionSchema = z.enum(['rename', 'trash', 'restore', 'archive', 'unarchive', 'delete'])
 
 export const OPERATIONS = {
@@ -194,7 +211,7 @@ export const OPERATIONS = {
   },
   clone_project: {
     description:
-      'Copy an existing project, including its files and settings, into a new project with the given name. Use it to start from a lab or journal template project.',
+      'Copy an existing project, its files, root document, and compiler included, into a new project with the given name. Overleaf gives the copy the account\'s default TeX Live image and spell-check language; set them with update_project_settings when they matter. Use it to start from a lab or journal template project.',
     inputSchema: z.object({ sourceProjectId: projectId.describe('Project to copy'), name: projectName }),
     outputSchema: createdProjectSchema,
     annotations: { destructiveHint: false, idempotentHint: false },
@@ -202,14 +219,14 @@ export const OPERATIONS = {
   },
   import_project_zip: {
     description:
-      'Create a new project from a local .zip archive of LaTeX sources. name defaults to the archive file name. Overleaf caps archives at about 50 MB and rate-limits this route: RATE_LIMITED means wait details.retryAfterMs before trying again, and nothing was created. Set the root document afterwards with update_project_settings if the archive has more than one .tex file at the top level.',
+      'Create a new project from a local .zip archive of LaTeX sources. name defaults to the archive file name. The returned name is the one Overleaf stored, which can differ: Overleaf uses the root document\'s \\title when present and adds " (n)" when the name is already taken; use it as confirmName. If the project was imported but its name could not be read back, the error (AUTH_EXPIRED, POLICY_DENIED, or TIMEOUT from that read, else REMOTE_ERROR) is never retryable and carries the new projectId in details; do not import again. Overleaf caps archives at about 50 MB and rate-limits this route: RATE_LIMITED means wait details.retryAfterMs before trying again, and nothing was created. Set the root document afterwards with update_project_settings if the archive has more than one .tex file at the top level.',
     inputSchema: z.object({
       localZipPath: z.string().min(1).describe('Local path of a .zip archive'),
       name: projectName.optional(),
     }),
     outputSchema: createdProjectSchema,
     annotations: { destructiveHint: false, idempotentHint: false },
-    effects: ['local-read', 'project-lifecycle'],
+    effects: ['local-read', 'project-lifecycle', 'overleaf-read'],
   },
   manage_project: {
     description:
@@ -233,10 +250,10 @@ export const OPERATIONS = {
   },
   update_project_settings: {
     description:
-      "Persist the project's root document, TeX engine, TeX Live image, or spell-check language in Overleaf's own project settings, so the web UI's Recompile follows the change. rootFilePath must name an existing text document. Returns the settings as re-read from the project. Provide at least one field.",
+      "Persist the project's root document, TeX engine, TeX Live image, or spell-check language in Overleaf's own project settings, so the web UI's Recompile follows the change. rootFilePath must name an existing .tex, .ltx, .Rtex, or .Rnw document; any other extension is INVALID_ARGUMENT before any request. Settings are applied one request at a time; if one fails, the error keeps its code, lists the settings already stored in details.applied and the failed one in details.failed, and no later setting is sent. Returns the settings as re-read from the project. Provide at least one field.",
     inputSchema: z.object({
       projectId,
-      rootFilePath: filePath.optional().describe('Document Overleaf should compile by default'),
+      rootFilePath: filePath.optional().describe('Document Overleaf should compile by default: .tex, .ltx, .Rtex, or .Rnw'),
       compiler: z.enum(COMPILERS).optional(),
       imageName: z.string().min(1).optional().describe('TeX Live image, as shown in Overleaf\'s menu'),
       spellCheckLanguage: z
@@ -269,7 +286,7 @@ export const OPERATIONS = {
   },
   write_file: {
     description:
-      'Replace a text document using a minimal verified OT edit, optionally recorded as tracked changes. Supply the new text either inline through content or from disk through localPath, never both; localPath keeps a whole-file replacement revision-checked without sending the file through the tool call.',
+      'Replace a text document using a minimal verified OT edit, optionally recorded as tracked changes. Supply the new text either inline through content or from disk through localPath, never both; localPath keeps a whole-file replacement revision-checked without sending the file through the tool call. A write that hit a timeout or a lost socket after the update was sent is never resent: the live document is observed instead, and recoveredAfterTimeout: true means the intended text was confirmed. On a ShareJS (legacy editor) document, text that adds a character outside the Basic Multilingual Plane, such as an emoji, adds another copy of one the document holds, or changes their order is INVALID_ARGUMENT with details.line (1-based) and nothing is sent, because Overleaf would store it as U+FFFD; editing text on either side of one the document already holds is fine.',
     inputSchema: z.object({
       projectId,
       filePath,
@@ -287,14 +304,14 @@ export const OPERATIONS = {
   },
   create_file: {
     description:
-      'Create a text document and optionally record non-empty initial content as tracked changes.',
+      'Create a text document and optionally record non-empty initial content as tracked changes. The content is written as by write_file once the empty document exists, so on a ShareJS (legacy editor) document, content that adds an emoji or other character outside the Basic Multilingual Plane is refused with INVALID_ARGUMENT, and a timeout or a lost socket is observed, never resent. If reading back or writing the content fails after the document was created, the error keeps its code and adds details.created: true; the document then exists, possibly empty, so do not create it again: read it with read_file and write the content with write_file.',
     inputSchema: z.object({ projectId, filePath, content: z.string().optional(), writeMode }),
     annotations: { destructiveHint: false, idempotentHint: false },
     effects: ['overleaf-write', 'overleaf-read'],
   },
   manage_entity: {
     description:
-      'Create a folder, rename, move, or delete an entity. Deletion requires confirmPath to exactly equal path.',
+      'Create a folder, rename, move, or delete an entity. Deletion requires confirmPath to exactly equal path. A name already used in the target folder (the entity\'s own included), and a folder moved into itself or one of its subfolders, are INVALID_ARGUMENT before anything is sent.',
     inputSchema: z.object({
       projectId,
       action: z.enum(['create_folder', 'rename', 'move', 'delete']),
@@ -395,7 +412,7 @@ export const OPERATIONS = {
   },
   download_file: {
     description:
-      'Download one Overleaf document or binary file to an explicit local path. Refuses to replace an existing local file unless overwrite is set.',
+      'Download one Overleaf document or binary file to an explicit local path. Refuses to replace an existing local file unless overwrite is set. The local path is checked before anything is fetched: an existing file without overwrite, or a folder (or a link to one) at localPath, is INVALID_ARGUMENT, a missing parent folder is NOT_FOUND, and a folder that cannot be written is INVALID_ARGUMENT with details.errno. With overwrite, an existing file is replaced atomically, keeping its permissions, so its folder must be writable.',
     inputSchema: z.object({
       projectId,
       filePath,
@@ -489,7 +506,7 @@ export const OPERATIONS = {
   },
   sync_directory: {
     description:
-      "Make a project folder match a local folder: upload new and changed files, and in mirror mode also delete what exists only in the project. Call plan_sync first, confirm the plan with the user, and pass its planToken; if the project or the folder changed since, REMOTE_DRIFT is returned and nothing changes. A planToken is required: without one the call is refused with CONFIRMATION_MISMATCH before anything is read, unless an additive sync passes unplanned: true to run without a plan on purpose (planned is then false); a mirror sync always needs one. Changed text documents are replaced through revision-checked write_file edits, recorded as tracked changes when writeMode is tracked, so a concurrent edit fails that file with REVISION_CONFLICT rather than being overwritten. Binaries and new files are uploaded, and one whose path changed since the plan fails with REMOTE_DRIFT; with writeMode tracked, new .tex, .bib, and similar text files are created with tracked content instead. Missing folders are created. Uploads and writes run first. Deletes run only in mirror mode, only when confirmDeleteCount equals the number of remoteOnly entries, else CONFIRMATION_MISMATCH, and never after any upload or write failed. Failures are per file and nothing is retried: the call continues unless stopOnError, then returns status, completed, failed, remaining, and a planToken to resume with. It saves tool calls, not time.",
+      "Make a project folder match a local folder: upload new and changed files, and in mirror mode also delete what exists only in the project. Call plan_sync first, confirm the plan with the user, and pass its planToken; if the project or the folder changed since, REMOTE_DRIFT is returned and nothing changes. A planToken is required: without one the call is refused with CONFIRMATION_MISMATCH before anything is read, unless an additive sync passes unplanned: true to run without a plan on purpose (planned is then false); a mirror sync always needs one. Changed text documents are replaced through revision-checked write_file edits, recorded as tracked changes when writeMode is tracked, so a concurrent edit fails that file with REVISION_CONFLICT rather than being overwritten. Binaries and new files are uploaded, and one whose path changed since the plan fails with REMOTE_DRIFT; with writeMode tracked, new .tex, .bib, and similar text files are created with tracked content instead. Missing folders are created. Uploads and writes run first. Deletes run only in mirror mode, only when confirmDeleteCount equals the number of remoteOnly entries, else CONFIRMATION_MISMATCH, and never after any upload or write failed. Failures are per file and nothing is retried: the call continues unless stopOnError, then returns status, completed, failed, remaining, and a planToken to resume with. Each failed entry carries the step's error details; a create that failed with details.created left its document behind, and resuming with the planToken writes it while it is still empty or holds the local text. On a ShareJS (legacy editor) document, text that adds an emoji or another character outside the Basic Multilingual Plane, or reorders existing ones, fails that file with INVALID_ARGUMENT. It saves tool calls, not time.",
     inputSchema: z.object({
       projectId,
       localFolderPath,
@@ -528,6 +545,7 @@ export const OPERATIONS = {
           action: syncActionSchema,
           errorCode: errorCodeSchema,
           message: z.string(),
+          details: z.record(z.string(), z.unknown()).optional(),
         })
       ),
       remaining: z.array(z.object({ destinationPath: z.string(), action: syncActionSchema })),
@@ -568,14 +586,15 @@ export const OPERATIONS = {
     effects: ['overleaf-read'],
   },
   get_section_content: {
-    description: 'Read one parsed section body from a single file.',
+    description:
+      'Read one parsed section body from a single file. The body runs from after the heading to the next heading at the same or a higher level, so it includes nested subsections, and the last section runs to the end of the file, including \\end{document}.',
     inputSchema: z.object({ projectId, filePath, sectionId: z.string().min(1) }),
     annotations: { readOnlyHint: true },
     effects: ['overleaf-read'],
   },
   write_section: {
     description:
-      'Replace one section body in a single file using a revision-checked write, optionally recorded as tracked changes. Included files are not traversed.',
+      'Replace one section body in a single file using a revision-checked write, optionally recorded as tracked changes. Included files are not traversed. content replaces the whole body as get_section_content returns it, including nested subsections and, for the last section, \\end{document}, so read it first and keep what should survive. The write is made as by write_file: on a ShareJS (legacy editor) document, content that adds an emoji or other character outside the Basic Multilingual Plane, or reorders existing ones, is refused with INVALID_ARGUMENT, and a timeout or a lost socket is observed, never resent.',
     inputSchema: z.object({
       projectId,
       filePath,
@@ -589,7 +608,7 @@ export const OPERATIONS = {
   },
   compile_project: {
     description:
-      `Compile a project and report on the build from its logs. Omit rootFilePath to build the root document configured in Overleaf, which is what the web UI's Recompile button uses; pass it to build a different document for this call only. Check summary.builtCleanly, not status: Overleaf reports status "success" whenever a PDF came out, even when LaTeX hit errors along the way. builtCleanly is true only when a PDF was produced, output.log was read, and it reports no error. summary lists the first ${MAX_LOG_ENTRIES} errors and warnings as { file?, line?, message } (errorCount and warningCount count all of them), undefined references and citations, missing files, pageCount, and pdfSizeBytes; messages never quote the document. A LaTeX error that stopped the build returns status "failure" with the same summary rather than an error. buildRef names this build to get_compile_log and download_compile_output, also in a later process. stopOnFirstError gives a short log holding the one error that matters; draft skips images for faster text-only builds. Compiles spend the account's compile allowance, so read the summary instead of recompiling. Errors: COMPILE_RATE_LIMITED (Overleaf ran nothing; wait details.retryAfterMs when given, then compile once more), COMPILE_UNAVAILABLE (try later), COMPILE_TIMEOUT (the build hit the time limit; details.buildRef, when present, reaches its partial log), COMPILE_FAILED (no build to report on), and TIMEOUT (the request timed out while Overleaf may still be compiling; it is not retried).`,
+      `Compile a project and report on the build from its logs. Omit rootFilePath to build the root document configured in Overleaf, which is what the web UI's Recompile button uses; pass it to build a different document for this call only. Check summary.builtCleanly, not status: Overleaf reports status "success" whenever a PDF came out, even when LaTeX hit errors along the way. builtCleanly is true only when a PDF was produced, output.log was read, and it reports no error. summary lists the first ${MAX_LOG_ENTRIES} errors and warnings as { file?, line?, message } (errorCount and warningCount count all of them), undefined references and citations, missing files, pageCount, and pdfSizeBytes; messages never quote the document. A LaTeX error that stopped the build returns status "failure" with the same summary rather than an error. outputFiles is Overleaf's listing, less an output.blg and output.bbl left over from an earlier build when BibTeX did not run for this one. buildRef names this build to get_compile_log and download_compile_output, also in a later process. stopOnFirstError gives a short log holding the one error that matters; draft skips images for faster text-only builds. Compiles spend the account's compile allowance, so read the summary instead of recompiling. Errors: COMPILE_RATE_LIMITED (Overleaf ran nothing; wait details.retryAfterMs when given, then compile once more), COMPILE_UNAVAILABLE (try later), COMPILE_TIMEOUT (the build hit the time limit; details.buildRef, when present, reaches its partial log), COMPILE_FAILED (no build to report on), and TIMEOUT (the request timed out while Overleaf may still be compiling; it is not retried).`,
     inputSchema: z.object({
       projectId,
       rootFilePath: filePath.optional(),
@@ -632,7 +651,7 @@ export const OPERATIONS = {
   },
   get_compile_log: {
     description:
-      `Read a build's LaTeX log (output.log) or BibTeX log (kind "bibtex", the .blg file), without compiling again. Without buildRef it reads the latest build compile_project made in this server process, else NO_BUILD; Overleaf keeps build output only for a while, and an expired build is BUILD_NOT_FOUND. At most 1 MB of the log is read, from its start, and the last tail lines are returned (default ${DEFAULT_LOG_TAIL}, at most ${MAX_LOG_TAIL}, and at most ${MAX_LOG_CHARS} characters). format "errors-only" returns only the lines that start an error. errorLines lists the first ${MAX_ERROR_LINES} error lines with their 1-based line numbers, each cut to ${MAX_MESSAGE_LENGTH} characters. truncated says whether anything of the log was left out. The log quotes source lines near each error; prefer compile_project's summary when that is enough.`,
+      `Read a build's LaTeX log (output.log) or BibTeX log (kind "bibtex", the .blg file), without compiling again. kind "bibtex" is NOT_FOUND when BibTeX did not run for the build, even if Overleaf still lists an output.blg left over from an earlier build. Without buildRef it reads the latest build compile_project made in this server process, else NO_BUILD; Overleaf keeps build output only for a while, and an expired build is BUILD_NOT_FOUND. At most 1 MB of the log is read, from its start, and the last tail lines are returned (default ${DEFAULT_LOG_TAIL}, at most ${MAX_LOG_TAIL}, and at most ${MAX_LOG_CHARS} characters). format "errors-only" returns only the lines that start an error. errorLines lists the first ${MAX_ERROR_LINES} error lines with their 1-based line numbers, each cut to ${MAX_MESSAGE_LENGTH} characters. truncated says whether anything of the log was left out. The log quotes source lines near each error; prefer compile_project's summary when that is enough.`,
     inputSchema: z.object({
       projectId,
       buildRef: z.string().min(1).optional().describe('From compile_project; defaults to the latest build in this process'),
@@ -658,7 +677,7 @@ export const OPERATIONS = {
   },
   download_compile_output: {
     description:
-      "Save a build's compiled PDF, or another output file such as output.log, output.blg, or output.synctex.gz, to a local path on the server's own disk, in one call. file defaults to output.pdf and must be a relative output path without \"..\". Without buildRef it uses the latest build compile_project made in this server process, else NO_BUILD; a file the build did not produce is NOT_FOUND, and an expired build is BUILD_NOT_FOUND. The folder must exist. An existing file is replaced only when overwrite is true, else CONFIRMATION_MISMATCH and nothing is downloaded; a replacement is atomic. A .pdf that does not start with %PDF- is PROTOCOL_UNSUPPORTED and nothing is written. Returns the absolute localPath, file, sizeBytes, buildId, and replaced.",
+      "Save a build's compiled PDF, or another output file such as output.log, output.blg, or output.synctex.gz, to a local path on the server's own disk, in one call. file defaults to output.pdf and must be a relative output path without \"..\". Without buildRef it uses the latest build compile_project made in this server process, else NO_BUILD; a file the build did not produce, an output.blg or output.bbl left over from an earlier build included, is NOT_FOUND, and an expired build is BUILD_NOT_FOUND. The folder must exist. An existing file is replaced only when overwrite is true, else CONFIRMATION_MISMATCH and nothing is downloaded; a replacement is atomic. A .pdf that does not start with %PDF- is PROTOCOL_UNSUPPORTED and nothing is written. Returns the absolute localPath, file, sizeBytes, buildId, and replaced.",
     inputSchema: z.object({
       projectId,
       localPath: z.string().min(1).describe('Local file to write, for example paper.pdf'),
@@ -679,25 +698,47 @@ export const OPERATIONS = {
   },
   list_comments: {
     description:
-      'List reviewer-thread messages and lazily resolve document ranges. Defaults to open threads.',
+      'List review comment threads and lazily resolve their document positions. Defaults to open threads. author keeps threads with a message whose author display name contains it (case-insensitive) or whose author id equals it. Returns threads, each with id, status, messages (id, author { id, displayName } or null, content, ISO timestamp), resolvedAt and resolvedBy when resolved, and when located filePath, start, end (1-based line, UTF-16 column), and quotedText; a thread without a document range has unlocated: true. Without filePath, positionsUnavailable: true means the deployment has no project-wide range index and every thread is unlocated.',
     inputSchema: z.object({
       projectId,
-      filePath: z.string().min(1).optional(),
+      filePath: z.string().min(1).optional().describe('Only threads anchored in this document'),
       status: z.enum(['open', 'resolved', 'all']).default('open'),
-      author: z.string().min(1).optional(),
+      author: z.string().min(1).optional().describe('Author display name substring, or exact author id'),
+    }),
+    outputSchema: z.object({
+      threads: z.array(commentThreadSchema.extend({
+        filePath: z.string().optional(),
+        start: position.optional(),
+        end: position.optional(),
+        quotedText: z.string().optional(),
+        unlocated: z.literal(true).optional(),
+      })),
+      positionsUnavailable: z.boolean(),
     }),
     annotations: { readOnlyHint: true },
     effects: ['overleaf-read'],
   },
   reply_to_comment: {
-    description: 'Reply to an existing Overleaf review thread with timeout deduplication.',
-    inputSchema: z.object({ projectId, threadId: z.string().min(1), content: z.string().min(1) }),
+    description:
+      'Reply to an existing review thread. An unknown threadId fails with NOT_FOUND and posts nothing. Returns threadId and the created message (id, author { id, displayName }, content, ISO timestamp), plus trackChangesActive and writeMode. A timed-out reply is never resubmitted: it returns recoveredAfterTimeout when the thread shows exactly one new matching message from this account, else OUTCOME_UNKNOWN; do not retry it blindly.',
+    inputSchema: z.object({
+      projectId,
+      threadId: z.string().min(1).describe('Existing thread id from list_comments'),
+      content: z.string().min(1),
+    }),
+    outputSchema: z.object({
+      threadId: z.string(),
+      message: commentMessageSchema,
+      trackChangesActive: z.boolean(),
+      writeMode: z.literal('untracked'),
+      recoveredAfterTimeout: z.literal(true).optional(),
+    }),
     annotations: { destructiveHint: false, idempotentHint: false },
     effects: ['overleaf-write', 'overleaf-read'],
   },
   add_comment: {
     description:
-      'Add and verify an anchored review comment using UTF-16 positions and expectedText.',
+      'Add and verify an anchored review comment using UTF-16 positions and expectedText. Returns threadId, the created thread (id, status, messages with author { id, displayName }, content, and ISO timestamp) when it could be read back, the resulting document revision and protocol, trackChangesActive, writeMode, and recoveredAfterTimeout when an attachment that timed out or lost its socket was confirmed.',
     inputSchema: z.object({
       projectId,
       filePath,
@@ -707,11 +748,21 @@ export const OPERATIONS = {
       expectedText: z.string().min(1),
       content: z.string().min(1),
     }),
+    outputSchema: z.object({
+      threadId: z.string(),
+      thread: commentThreadSchema.optional(),
+      revision: z.string(),
+      protocol: z.enum(['sharejs', 'history-ot']),
+      trackChangesActive: z.boolean(),
+      writeMode: z.literal('untracked'),
+      recoveredAfterTimeout: z.literal(true).optional(),
+    }),
     annotations: { destructiveHint: false, idempotentHint: false },
     effects: ['overleaf-write', 'overleaf-read'],
   },
   set_comment_status: {
-    description: 'Resolve or reopen a review thread and verify its resulting document revision.',
+    description:
+      'Resolve or reopen a review thread and verify its resulting document revision. filePath must be the document the thread is anchored in, as list_comments reports it; a thread not anchored there fails with NOT_FOUND and nothing changes. Returns threadId, status, the resulting revision, trackChangesActive, writeMode, and recoveredAfterTimeout when a change that timed out or lost its socket was confirmed.',
     inputSchema: z.object({
       projectId,
       filePath,
@@ -724,7 +775,7 @@ export const OPERATIONS = {
   },
   monitor_project_history: {
     description:
-      'Poll one recent project-history window and return updates newer than an optional version cursor.',
+      'Poll one recent project-history window and return updates newer than an optional version cursor. In a group that starts before the cursor, only project operations at or after it are listed.',
     inputSchema: z.object({
       projectId,
       sinceVersion: z.number().int().nonnegative().optional(),

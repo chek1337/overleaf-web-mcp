@@ -26,7 +26,7 @@ unexpected shape surfaces as `PROTOCOL_UNSUPPORTED` rather than a parse exceptio
 | `POST /Project/:id/clone` | `{ projectName }` | `project_id` (validated) | `clone_project` |
 | `POST /project/new/upload` | multipart `qqfile` (the archive) and `name` | `project_id` (validated); `{ success: false, error }` or HTTP 422 with a short `error` code on rejection; HTTP 429 when throttled | `import_project_zip` |
 | `POST /project/:id/rename` | `{ newProjectName }` | nothing | `manage_project` `rename` |
-| `POST /project/:id/settings` | any of `rootDocId`, `compiler`, `imageName`, `spellCheckLanguage` | nothing; the server re-joins the project to report the persisted values | `update_project_settings` |
+| `POST /project/:id/settings` | one of `compiler`, `imageName`, `spellCheckLanguage`, `rootDocId` per request, sent in that order (the order Overleaf applies them) | nothing; the server re-joins the project to report the persisted values | `update_project_settings` |
 | `POST /project/:id/trash`, `DELETE /project/:id/trash` | nothing | nothing | `manage_project` `trash`, `restore` |
 | `POST /Project/:id/archive`, `DELETE /Project/:id/archive` | nothing | nothing | `manage_project` `archive`, `unarchive` |
 | `DELETE /Project/:id` | nothing | nothing | `manage_project` `delete`; the server only sends it for a project the list reports as trashed |
@@ -70,7 +70,7 @@ import). Only a value matching `^[a-z][a-z0-9_]{0,63}$` is ever propagated, unde
 
 | Method and route | Sent | Read | Used by |
 | --- | --- | --- | --- |
-| `POST /project/:id/compile?file_line_errors=true` | `{ rootDoc_id, check: "silent", incrementalCompilesEnabled: true }`, plus `stopOnFirstError: true` and `draft: true` when asked | `status`; `outputFiles[]` reduced to `path`, `type`, and `build`; numeric `stats`; `clsiServerId`. Everything else, `url`, `timings`, and `pdfDownloadDomain` included, is dropped | `compile_project` |
+| `POST /project/:id/compile?file_line_errors=true` | `{ rootDoc_id, rootResourcePath, check: "silent", incrementalCompilesEnabled: true }` (overleaf.com builds `rootResourcePath`, and the configured root without it), plus `stopOnFirstError: true` and `draft: true` when asked | `status`; `outputFiles[]` reduced to `path`, `type`, and `build`; numeric `stats`; `clsiServerId`. Everything else, `url`, `timings`, and `pdfDownloadDomain` included, is dropped | `compile_project` |
 | `GET /project/:id/build/:buildId/output/:file` | `?clsiserverid=` when the compile response named one | the output file: `output.log` and `.blg` logs, at most 1 MB, for the summary and `get_compile_log`; any output for `download_compile_output` | `compile_project`, `get_compile_log`, `download_compile_output`, the compile output resources |
 | `POST /project/:id/compile/stop` | nothing | nothing | `stop_compile` |
 

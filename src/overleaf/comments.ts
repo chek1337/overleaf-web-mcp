@@ -1,5 +1,3 @@
-import { randomBytes } from 'node:crypto'
-
 import { asMcpError, McpError } from '../core/errors.js'
 import { assertUpdateSize } from '../core/limits.js'
 import { AccessPolicy, assertPathSafeId } from '../core/policy.js'
@@ -14,6 +12,7 @@ import { lineColumnToOffset, normalizeLf, offsetToLineColumn, type LineColumn } 
 import {
   buildCommentOperation,
   buildStatusOperation,
+  generateIdSeed,
   makeUpdate,
   snapshotToVisibleOffset,
   visibleToSnapshotOffset,
@@ -45,18 +44,28 @@ interface CommentConnections {
   invalidate(projectId: string): Promise<void>
 }
 
+interface OverleafUser {
+  id?: string
+  first_name?: string
+  last_name?: string
+  [key: string]: unknown
+}
+
 interface ThreadMessage {
   id?: string
   content?: string
   timestamp?: string | number
   user_id?: string
-  user?: { id?: string; name?: string; email?: string; [key: string]: unknown }
+  user?: OverleafUser
   [key: string]: unknown
 }
 
 interface ThreadData {
   messages?: ThreadMessage[]
   resolved?: boolean
+  resolved_at?: string | number
+  resolved_by_user_id?: string
+  resolved_by_user?: OverleafUser
   [key: string]: unknown
 }
 
@@ -71,14 +80,32 @@ interface LocatedRange {
   resolved?: boolean
 }
 
-export interface ListedComment extends ThreadData {
+export interface CommentAuthor {
+  id: string
+  displayName: string
+}
+
+export interface CommentMessage {
+  id?: string
+  author: CommentAuthor | null
+  content: string
+  timestamp?: string
+}
+
+export interface CommentThread {
   id: string
   status: 'open' | 'resolved'
+  messages: CommentMessage[]
+  resolvedAt?: string
+  resolvedBy?: CommentAuthor
+}
+
+export interface ListedComment extends CommentThread {
   filePath?: string
   start?: LineColumn
   end?: LineColumn
   quotedText?: string
-  unlocated?: boolean
+  unlocated?: true
 }
 
 export interface AddCommentInput {
@@ -103,8 +130,7 @@ export interface CommentsApiOptions {
 }
 
 function generateThreadId(): string {
-  const timestamp = Math.floor(Date.now() / 1000).toString(16).padStart(8, '0')
-  return `${timestamp}${randomBytes(5).toString('hex')}000001`.slice(0, 24)
+  return `${generateIdSeed()}000001`
 }
 
 function legacyRange(docId: string, value: unknown): LocatedRange | undefined {
@@ -142,7 +168,8 @@ function rangesFromDocument(document: JoinedDocument): LocatedRange[] {
         start,
         end,
         quotedText: document.content.slice(start, end),
-        ...(comment.resolved === undefined ? {} : { resolved: comment.resolved }),
+        // Overleaf leaves resolved out of an open comment's snapshot entry.
+        resolved: comment.resolved === true,
       }]
     })
   }
@@ -168,12 +195,49 @@ function projectRanges(value: unknown): LocatedRange[] {
   return output
 }
 
-function authorMatches(thread: ThreadData, filter: string): boolean {
+function isoTimestamp(value: string | number | undefined): string | undefined {
+  if (value === undefined) return undefined
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString()
+}
+
+// Overleaf sends each user's name and email; only the id and display name leave this module.
+function mapAuthor(userId: string | undefined, user: OverleafUser | undefined): CommentAuthor | null {
+  const id = typeof user?.id === 'string' ? user.id : typeof userId === 'string' ? userId : undefined
+  if (id === undefined) return null
+  const names = [user?.first_name, user?.last_name].filter(name => typeof name === 'string')
+  return { id, displayName: names.join(' ').trim() }
+}
+
+function mapMessage(message: ThreadMessage): CommentMessage {
+  const timestamp = isoTimestamp(message.timestamp)
+  return {
+    ...(typeof message.id === 'string' ? { id: message.id } : {}),
+    author: mapAuthor(message.user_id, message.user),
+    content: typeof message.content === 'string' ? message.content : '',
+    ...(timestamp === undefined ? {} : { timestamp }),
+  }
+}
+
+function mapThread(id: string, thread: ThreadData): CommentThread {
+  const resolved = thread.resolved === true
+  const resolvedAt = resolved ? isoTimestamp(thread.resolved_at) : undefined
+  const resolvedBy = resolved ? mapAuthor(thread.resolved_by_user_id, thread.resolved_by_user) : null
+  return {
+    id,
+    status: resolved ? 'resolved' : 'open',
+    messages: (thread.messages ?? []).map(mapMessage),
+    ...(resolvedAt === undefined ? {} : { resolvedAt }),
+    ...(resolvedBy === null ? {} : { resolvedBy }),
+  }
+}
+
+function authorMatches(thread: CommentThread, filter: string): boolean {
   const needle = filter.toLocaleLowerCase()
-  return (thread.messages ?? []).some(message => {
-    const values = [message.user_id, message.user?.id, message.user?.name, message.user?.email]
-    return values.some(value => value?.toLocaleLowerCase().includes(needle))
-  })
+  return thread.messages.some(({ author }) =>
+    author !== null &&
+    (author.id === filter || author.displayName.toLocaleLowerCase().includes(needle))
+  )
 }
 
 async function leaveQuietly(connection: CommentConnection, docId: string): Promise<void> {
@@ -186,6 +250,14 @@ async function leaveQuietly(connection: CommentConnection, docId: string): Promi
 
 function attachment(document: JoinedDocument, threadId: string): LocatedRange | undefined {
   return rangesFromDocument(document).find(range => range.threadId === threadId)
+}
+
+// A history-OT comment whose text was deleted keeps its entry with no range, and is still this document's.
+function anchoredIn(document: JoinedDocument, threadId: string): boolean {
+  if (document.protocol === 'history-ot') {
+    return ((document.rawSnapshot as HistorySnapshot).comments ?? []).some(comment => comment.id === threadId)
+  }
+  return attachment(document, threadId) !== undefined
 }
 
 /**
@@ -228,12 +300,12 @@ export class CommentsApi {
     this.#policy.assertProject(projectId)
     const threads = await this.getThreads(projectId)
     const status = options.status ?? 'open'
-    const filtered = Object.entries(threads).filter(([, thread]) => {
-      const resolved = thread.resolved === true
-      if (status === 'open' && resolved) return false
-      if (status === 'resolved' && !resolved) return false
-      return options.author ? authorMatches(thread, options.author) : true
-    })
+    const filtered = Object.entries(threads)
+      .map(([id, thread]): [string, CommentThread] => [id, mapThread(id, thread)])
+      .filter(([, thread]) => {
+        if (status !== 'all' && thread.status !== status) return false
+        return options.author ? authorMatches(thread, options.author) : true
+      })
 
     let indexedRanges: LocatedRange[] = []
     let positionsUnavailable = false
@@ -258,12 +330,7 @@ export class CommentsApi {
     if (positionsUnavailable) {
       return {
         positionsUnavailable: true,
-        threads: filtered.map(([id, thread]) => ({
-          ...thread,
-          id,
-          status: thread.resolved === true ? 'resolved' : 'open',
-          unlocated: true,
-        })),
+        threads: filtered.map(([, thread]) => ({ ...thread, unlocated: true })),
       }
     }
 
@@ -305,20 +372,13 @@ export class CommentsApi {
             continue
           }
           if (!range || !live) {
-            listed.push({
-              ...thread,
-              id,
-              status: thread.resolved === true ? 'resolved' : 'open',
-              unlocated: true,
-            })
+            listed.push({ ...thread, unlocated: true })
             continue
           }
           const start = range.start
           const end = range.end
           listed.push({
             ...thread,
-            id,
-            status: thread.resolved === true ? 'resolved' : 'open',
             ...(pathById.get(range.docId) === undefined
               ? {}
               : { filePath: pathById.get(range.docId)! }),
@@ -338,17 +398,34 @@ export class CommentsApi {
     content: string
   ): Promise<{
     threadId: string
-    thread: ThreadData
+    message: CommentMessage
     trackChangesActive: boolean
     writeMode: 'untracked'
     recoveredAfterTimeout?: boolean
   }> {
     this.#policy.assertProject(projectId)
     assertPathSafeId(threadId, 'threadId')
-    // The thread is read back afterwards, so that read is allowed before anything is posted.
+    // The thread is read before and after posting, so that read is allowed before anything is posted.
     this.#policy.assertEffect('overleaf-write', 'overleaf-read')
     const normalized = normalizeLf(content)
+    // Overleaf creates any thread a message is posted to, so an unknown id would start a new thread.
+    const before = (await this.getThreads(projectId))[threadId]
+    if (!before) {
+      throw new McpError('NOT_FOUND', 'No comment thread has this threadId.', { details: { threadId } })
+    }
+    // Read before posting: a project join that fails afterwards would report a posted reply as an error.
+    const disclosure = await this.#mutationDisclosure(projectId)
+    const earlier = new Set((before.messages ?? []).map(message => message.id))
     const started = this.#now()
+    // A reply is identified as the one new message in the thread from this account with this content.
+    const created = (thread: ThreadData | undefined): ThreadMessage[] =>
+      (thread?.messages ?? []).filter(message =>
+        typeof message.id === 'string' &&
+        !earlier.has(message.id) &&
+        message.content === normalized &&
+        (this.#currentUserId === undefined ||
+          mapAuthor(message.user_id, message.user)?.id === this.#currentUserId)
+      )
     try {
       await this.#http.postJson(`/project/${encodeURIComponent(projectId)}/thread/${encodeURIComponent(threadId)}/messages`, {
         content: normalized,
@@ -357,21 +434,15 @@ export class CommentsApi {
       if (!(error instanceof McpError) || !['TIMEOUT', 'OUTCOME_UNKNOWN'].includes(error.code)) {
         throw error
       }
-      const thread = (await this.getThreads(projectId))[threadId]
       // A timed-out POST is accepted only when author, content, and request window identify one reply.
-      const matched = thread?.messages?.some(message => {
-        const timestamp = new Date(message.timestamp ?? 0).getTime()
-        return (
-          this.#currentUserId !== undefined &&
-          message.user_id === this.#currentUserId &&
-          message.content === normalized &&
-          timestamp >= started - 1_000 &&
-          timestamp <= this.#now() + 60_000
-        )
-      })
-      if (thread && matched) {
-        const disclosure = await this.#mutationDisclosure(projectId)
-        return { threadId, thread, ...disclosure, recoveredAfterTimeout: true }
+      const matched = this.#currentUserId === undefined
+        ? []
+        : created((await this.getThreads(projectId))[threadId]).filter(message => {
+          const timestamp = new Date(message.timestamp ?? 0).getTime()
+          return timestamp >= started - 1_000 && timestamp <= this.#now() + 60_000
+        })
+      if (matched.length === 1) {
+        return { threadId, message: mapMessage(matched[0]!), ...disclosure, recoveredAfterTimeout: true }
       }
       throw new McpError(
         'OUTCOME_UNKNOWN',
@@ -379,9 +450,15 @@ export class CommentsApi {
         { details: { threadId } }
       )
     }
-    const thread = (await this.getThreads(projectId))[threadId]
-    if (!thread) throw new McpError('OUTCOME_UNKNOWN', 'Reply succeeded but the thread could not be refreshed.')
-    return { threadId, thread, ...await this.#mutationDisclosure(projectId) }
+    const replies = created((await this.getThreads(projectId))[threadId])
+    if (replies.length !== 1) {
+      throw new McpError(
+        'OUTCOME_UNKNOWN',
+        'Overleaf accepted the reply but it could not be read back. Do not retry it.',
+        { details: { threadId } }
+      )
+    }
+    return { threadId, message: mapMessage(replies[0]!), ...disclosure }
   }
 
   async #mutationDisclosure(projectId: string): Promise<{
@@ -398,7 +475,7 @@ export class CommentsApi {
 
   async addComment(input: AddCommentInput): Promise<{
     threadId: string
-    thread?: ThreadData
+    thread?: CommentThread
     revision: string
     protocol: OtProtocol
     trackChangesActive: boolean
@@ -475,7 +552,8 @@ export class CommentsApi {
           submitError = error
         }
         await leaveQuietly(connection, entity.id)
-        if (submitError instanceof McpError && submitError.code === 'TIMEOUT') {
+        // OUTCOME_UNKNOWN means the socket failed after the update was sent, so it may have applied.
+        if (submitError instanceof McpError && ['TIMEOUT', 'OUTCOME_UNKNOWN'].includes(submitError.code)) {
           return {
             entity,
             before,
@@ -499,7 +577,21 @@ export class CommentsApi {
           }
           throw asMcpError(submitError)
         }
-        const live = await connection.joinDocument(entity.id)
+        let live: JoinedDocument
+        try {
+          live = await connection.joinDocument(entity.id)
+        } catch (error) {
+          // The attachment applied, so a failed verification read is settled by observation, never a resend.
+          return {
+            entity,
+            before,
+            visibleStart,
+            visibleEnd,
+            trackChangesActive: connection.trackChangesActive,
+            submitError: error,
+            confirmed: true,
+          }
+        }
         await leaveQuietly(connection, entity.id)
         return {
           entity,
@@ -514,6 +606,9 @@ export class CommentsApi {
 
     let live = submit.live
     let recoveredAfterTimeout = false
+    // Overleaf acknowledged the attachment and only its verification read failed, so it is never cleaned up.
+    const confirmed = submit.confirmed === true
+    const timedOut = submit.submitError instanceof McpError && submit.submitError.code === 'TIMEOUT'
     if (!live) {
       // An ambiguous attachment is recovered by observing the generated thread ID and exact range.
       await this.#connections.invalidate(input.projectId)
@@ -539,7 +634,7 @@ export class CommentsApi {
           if (!unchanged) {
             throw new McpError(
               'OUTCOME_UNKNOWN',
-              'The document changed while the timed-out comment attachment remained unconfirmed.',
+              'The document changed while the comment attachment remained unconfirmed.',
               { details: { threadId } }
             )
           }
@@ -552,7 +647,7 @@ export class CommentsApi {
         await new Promise<void>(resolve => setTimeout(resolve, this.#recoveryPollIntervalMs))
       } while (Date.now() <= deadline)
       if (!live) {
-        throw new McpError('OUTCOME_UNKNOWN', 'Could not verify comment attachment after timeout.', {
+        throw new McpError('OUTCOME_UNKNOWN', 'Could not verify the unconfirmed comment attachment.', {
           cause: observationError,
           details: { threadId },
         })
@@ -569,7 +664,7 @@ export class CommentsApi {
         live.protocol === submit.before.protocol &&
         live.version === submit.before.version &&
         contentHash(live.content) === contentHash(submit.before.content)
-      if (!recoveredAfterTimeout || !unchanged) {
+      if (confirmed || !recoveredAfterTimeout || !unchanged) {
         throw new McpError(
           'OUTCOME_UNKNOWN',
           'The comment thread exists but its exact range could not be verified.',
@@ -587,7 +682,8 @@ export class CommentsApi {
           details: { threadId },
         })
       }
-      throw new McpError('TIMEOUT', 'The comment range attachment was not applied.', {
+      throw new McpError(timedOut ? 'TIMEOUT' : 'REMOTE_ERROR', 'The comment range attachment was not applied.', {
+        retryable: false,
         details: { threadId, outcome: 'not_applied' },
       })
     }
@@ -595,7 +691,7 @@ export class CommentsApi {
     const thread = (await this.getThreads(input.projectId))[threadId]
     return {
       threadId,
-      ...(thread === undefined ? {} : { thread }),
+      ...(thread === undefined ? {} : { thread: mapThread(threadId, thread) }),
       revision: createRevision({
         projectId: input.projectId,
         docId: live.docId,
@@ -640,6 +736,12 @@ export class CommentsApi {
           otVersion: before.version,
           content: before.content,
         })
+        if (!anchoredIn(before, input.threadId)) {
+          await leaveQuietly(connection, entity.id)
+          throw new McpError('NOT_FOUND', 'The comment thread is not anchored in filePath.', {
+            details: { threadId: input.threadId },
+          })
+        }
         let submitError: unknown
         try {
           // History-OT stores status in its snapshot; ShareJS exposes dedicated REST actions.
@@ -674,7 +776,19 @@ export class CommentsApi {
           }
         }
         if (submitError) throw asMcpError(submitError)
-        const live = await connection.joinDocument(entity.id)
+        let live: JoinedDocument
+        try {
+          live = await connection.joinDocument(entity.id)
+        } catch (error) {
+          // The change applied, so a failed verification read is settled by observation, never a resend.
+          return {
+            before,
+            entity,
+            trackChangesActive: connection.trackChangesActive,
+            submitError: error,
+            confirmed: true,
+          }
+        }
         await leaveQuietly(connection, entity.id)
         return { before, entity, live, trackChangesActive: connection.trackChangesActive }
       })
@@ -682,10 +796,13 @@ export class CommentsApi {
 
     let live = submission.live
     let recoveredAfterTimeout = false
+    // Overleaf acknowledged the change and only its verification read failed, so it can never be not applied.
+    const confirmed = submission.confirmed === true
+    const timedOut = submission.submitError instanceof McpError && submission.submitError.code === 'TIMEOUT'
     if (!live) {
       await this.#connections.invalidate(input.projectId)
       const deadline = Date.now() + this.#recoveryTimeoutMs
-      let observedUnapplied = false
+      let matched = false
       let observationError: unknown
       do {
         try {
@@ -704,8 +821,10 @@ export class CommentsApi {
               'Document protocol changed during comment-status recovery.'
             )
           }
-          if (await this.#statusMatches(input.projectId, live, input.threadId, resolved)) break
-          observedUnapplied = true
+          if (await this.#statusMatches(input.projectId, live, input.threadId, resolved)) {
+            matched = true
+            break
+          }
         } catch (error) {
           if (error instanceof McpError && error.code === 'PROTOCOL_UNSUPPORTED') throw error
           live = undefined
@@ -716,16 +835,23 @@ export class CommentsApi {
       } while (Date.now() <= deadline)
 
       if (!live) {
-        throw new McpError('OUTCOME_UNKNOWN', 'Could not observe comment status after timeout.', {
+        throw new McpError('OUTCOME_UNKNOWN', 'Could not observe the unconfirmed comment status.', {
           cause: observationError,
           details: { threadId: input.threadId },
         })
       }
-      if (!(await this.#statusMatches(input.projectId, live, input.threadId, resolved))) {
+      if (!matched && confirmed) {
         throw new McpError(
-          observedUnapplied ? 'TIMEOUT' : 'OUTCOME_UNKNOWN',
-          'The comment status request timed out and the requested state is not live.',
-          { details: { threadId: input.threadId, outcome: 'not_applied' } }
+          'OUTCOME_UNKNOWN',
+          'Overleaf accepted the comment status change but the requested state could not be verified. Do not retry it.',
+          { retryable: false, details: { threadId: input.threadId } }
+        )
+      }
+      if (!matched) {
+        throw new McpError(
+          timedOut ? 'TIMEOUT' : 'REMOTE_ERROR',
+          'The comment status change was not confirmed and the requested state is not live.',
+          { retryable: false, details: { threadId: input.threadId, outcome: 'not_applied' } }
         )
       }
       recoveredAfterTimeout = true
@@ -757,6 +883,13 @@ export class CommentsApi {
     threadId: string,
     resolved: boolean
   ): Promise<boolean> {
+    if (document.protocol === 'history-ot') {
+      // The snapshot holds the status even for a comment whose anchored text was deleted.
+      const comment = ((document.rawSnapshot as HistorySnapshot).comments ?? [])
+        .find(entry => entry.id === threadId)
+      // Overleaf writes resolved: true only for a resolved comment and leaves the key out for an open one.
+      if (comment) return (comment.resolved === true) === resolved
+    }
     const range = attachment(document, threadId)
     if (range?.resolved !== undefined) return range.resolved === resolved
     const thread = (await this.getThreads(projectId))[threadId]

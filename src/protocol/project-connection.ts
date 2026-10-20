@@ -9,6 +9,7 @@ import {
   type RawFolder,
 } from '../overleaf/tree.js'
 import { historyVisibleContent, type HistorySnapshot } from './ot.js'
+import { notConnectedError } from './socketio09-client.js'
 import { upstreamReason } from './upstream-reason.js'
 
 export interface SocketPeerLike {
@@ -17,6 +18,7 @@ export interface SocketPeerLike {
   removeListener(event: string, listener: (...args: any[]) => void): this
   call(name: string, args: unknown[], timeoutMs: number): Promise<unknown[]>
   close(): void
+  readonly closed?: boolean
 }
 
 export interface JoinProjectData {
@@ -54,9 +56,18 @@ export interface ProjectConnectionOptions {
   applyTimeoutMs?: number
 }
 
+// Fatal, so only bytes that are not UTF-8 fail; a real U+FFFD in the text decodes like any character.
+const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
+
+/** Overleaf sends each ShareJS line as the latin1 string of its UTF-8 bytes. */
 function decodeLegacyLine(line: string): string {
-  const decoded = Buffer.from(line, 'latin1').toString('utf8')
-  return decoded.includes('\uFFFD') ? line : decoded
+  // A code unit above 0xFF means the line was never byte-encoded and is already text.
+  if (/[\u0100-\u{10FFFF}]/u.test(line)) return line
+  try {
+    return utf8.decode(Buffer.from(line, 'latin1'))
+  } catch {
+    return line
+  }
 }
 
 function effectiveTrackChanges(
@@ -140,6 +151,7 @@ export class ProjectConnection {
   readonly queue = new FifoQueue()
   readonly #callTimeoutMs: number
   readonly #applyTimeoutMs: number
+  #disconnected = false
 
   constructor(options: ProjectConnectionOptions) {
     if (!options.supportedProtocolVersions.includes(options.join.protocolVersion)) {
@@ -172,6 +184,9 @@ export class ProjectConnection {
     this.#callTimeoutMs = options.callTimeoutMs ?? 30_000
     this.#applyTimeoutMs = options.applyTimeoutMs ?? this.#callTimeoutMs
 
+    this.peer.once('disconnect', () => {
+      this.#disconnected = true
+    })
     // The `recive*` spelling is part of Overleaf's wire protocol and must not be corrected locally.
     this.peer.on('reciveEntityRename', (entityId: unknown, name: unknown) => {
       if (typeof entityId === 'string' && typeof name === 'string') {
@@ -213,6 +228,11 @@ export class ProjectConnection {
         ;(destination.fileRefs ??= []).push(value)
       }
     })
+  }
+
+  /** True once the socket has gone; the cache then opens a fresh connection for the next call. */
+  get closed(): boolean {
+    return this.#disconnected || this.peer.closed === true
   }
 
   get rootFolderId(): string {
@@ -282,11 +302,7 @@ export class ProjectConnection {
   }
 
   async joinDocument(docId: string): Promise<JoinedDocument> {
-    const args = await this.peer.call(
-      'joinDoc',
-      [docId, { encodeRanges: true, supportsHistoryOT: true }],
-      this.#callTimeoutMs
-    )
+    const args = await this.#read('joinDoc', [docId, { encodeRanges: true, supportsHistoryOT: true }])
     const [error, rawLines, rawVersion, , ranges, rawType = 'sharejs-text-ot'] = args
     if (error) {
       throw new McpError('REMOTE_ERROR', 'Overleaf refused to open the document.', {
@@ -336,7 +352,7 @@ export class ProjectConnection {
   }
 
   async leaveDocument(docId: string): Promise<void> {
-    const [error] = await this.peer.call('leaveDoc', [docId], this.#callTimeoutMs)
+    const [error] = await this.#read('leaveDoc', [docId])
     if (error) {
       throw new McpError('REMOTE_ERROR', 'Overleaf refused to close the document.', {
         details: { event: 'leaveDoc', reason: upstreamReason(error) },
@@ -349,6 +365,7 @@ export class ProjectConnection {
     if (!Number.isInteger(version)) {
       throw new McpError('INVALID_ARGUMENT', 'OT update requires an integer version.')
     }
+    if (this.closed) throw notConnectedError()
 
     let appliedTimer: NodeJS.Timeout | undefined
     let onApplied: ((message: unknown) => void) | undefined
@@ -391,11 +408,18 @@ export class ProjectConnection {
 
     try {
       // The callback acknowledges receipt; only the matching event confirms application.
-      const [error] = await this.peer.call(
-        'applyOtUpdate',
-        [docId, update],
-        this.#applyTimeoutMs
-      )
+      let reply: unknown[]
+      try {
+        reply = await this.peer.call('applyOtUpdate', [docId, update], this.#applyTimeoutMs)
+      } catch (error) {
+        // The socket was open, so the update was sent: any failure but a timeout leaves it unknown.
+        throw error instanceof McpError && ['TIMEOUT', 'OUTCOME_UNKNOWN'].includes(error.code)
+          ? error
+          : new McpError('OUTCOME_UNKNOWN', 'The Overleaf socket failed after the OT update was sent.', {
+            cause: error,
+          })
+      }
+      const [error] = reply
       if (error) {
         throw new McpError('REMOTE_ERROR', 'Overleaf refused the OT update.', {
           details: { event: 'applyOtUpdate', reason: upstreamReason(error) },
@@ -411,5 +435,19 @@ export class ProjectConnection {
 
   close(): void {
     this.peer.close()
+  }
+
+  /** A read changes nothing, so a socket lost before its reply is an ordinary, retryable failure. */
+  async #read(name: string, args: unknown[]): Promise<unknown[]> {
+    try {
+      return await this.peer.call(name, args, this.#callTimeoutMs)
+    } catch (error) {
+      if (!(error instanceof McpError) || error.code !== 'OUTCOME_UNKNOWN') throw error
+      throw new McpError('REMOTE_ERROR', 'The Overleaf socket closed before it answered.', {
+        retryable: true,
+        details: { event: name, reason: 'disconnected' },
+        cause: error,
+      })
+    }
   }
 }

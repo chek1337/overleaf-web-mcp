@@ -1,4 +1,6 @@
-import { createMinimalTextEdit } from '../core/diff.js'
+import { randomBytes } from 'node:crypto'
+
+import { createMinimalTextEdit, createOutsideBmpPreservingEdits } from '../core/diff.js'
 import type { OtProtocol } from '../core/revision.js'
 
 export interface RawRange {
@@ -61,12 +63,19 @@ export function snapshotToVisibleOffset(snapshot: HistorySnapshot, snapshotOffse
   return snapshotOffset - deletedBefore
 }
 
+/**
+ * ShareJS applies components in order, each at a position in the text the previous ones left, so
+ * the operation steps around a character outside the BMP that the legacy editor could not store
+ * again. A target that adds one is refused before this is called.
+ */
 export function buildShareJsOperation(before: string, after: string): ShareJsComponent[] {
-  const edit = createMinimalTextEdit(before, after)
-  if (!edit) return []
+  const plan = createOutsideBmpPreservingEdits(before, after)
+  const edits = 'edits' in plan ? plan.edits : [createMinimalTextEdit(before, after)!]
   const op: ShareJsComponent[] = []
-  if (edit.deleteText) op.push({ p: edit.position, d: edit.deleteText })
-  if (edit.insertText) op.push({ p: edit.position, i: edit.insertText })
+  for (const edit of edits) {
+    if (edit.deleteText) op.push({ p: edit.position, d: edit.deleteText })
+    if (edit.insertText) op.push({ p: edit.position, i: edit.insertText })
+  }
   return op
 }
 
@@ -134,6 +143,15 @@ export function buildStatusOperation(
   return [{ commentId: threadId, resolved }]
 }
 
+/**
+ * The first 18 hex characters of a Mongo ObjectId: seconds, then random bytes. Overleaf appends a
+ * six-character counter to the seed to make comment and tracked-change ids.
+ */
+export function generateIdSeed(): string {
+  const timestamp = Math.floor(Date.now() / 1000).toString(16).padStart(8, '0')
+  return `${timestamp}${randomBytes(5).toString('hex')}`.slice(0, 18)
+}
+
 export function makeUpdate(
   docId: string,
   version: number,
@@ -148,7 +166,7 @@ export function makeUpdate(
     doc: docId,
     v: version,
     op: operation,
-    // ShareJS tracked writes attach author metadata; untracked and history-OT writes omit it here.
+    // ShareJS tracked writes attach a track-changes id seed; untracked and history-OT writes omit it.
     ...(trackingMetadata === undefined ? {} : { meta: trackingMetadata }),
   }
 }

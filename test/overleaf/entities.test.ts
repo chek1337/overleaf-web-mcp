@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { chmod, link, lstat, mkdtemp, readdir, readFile, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -26,7 +26,7 @@ const tree: ProjectEntity[] = [
   },
 ]
 
-function harness() {
+function harness(entities: ProjectEntity[] = tree) {
   const http = {
     postJson: vi.fn(async () => ({ _id: 'new-doc', name: 'new.tex' })),
     deleteJson: vi.fn(async () => ({})),
@@ -39,7 +39,7 @@ function harness() {
   }
   const connection = {
     queue: new FifoQueue(),
-    getTree: () => tree,
+    getTree: () => entities,
     rootFolderId: 'root',
     trackChangesActive: false,
     rootDocId: 'doc',
@@ -96,6 +96,41 @@ describe('entity API', () => {
     })
     expect(http.deleteJson).toHaveBeenCalledWith('/project/project/doc/doc')
     expect(result).toMatchObject({ trackChangesActive: false, writeMode: 'untracked' })
+  })
+
+  test('refuses a name already taken in the folder, and a folder moved into itself, before any request', async () => {
+    const entities: ProjectEntity[] = [
+      { id: 'a', name: 'a', path: 'a', type: 'folder', parentFolderId: 'root' },
+      { id: 'b', name: 'b', path: 'a/b', type: 'folder', parentFolderId: 'a' },
+      { id: 'x', name: 'x.tex', path: 'a/x.tex', type: 'doc', parentFolderId: 'a' },
+      { id: 'y', name: 'y.tex', path: 'a/y.tex', type: 'doc', parentFolderId: 'a' },
+      { id: 'top', name: 'x.tex', path: 'x.tex', type: 'doc', parentFolderId: 'root' },
+    ]
+    const { api, http } = harness(entities)
+
+    for (const input of [
+      { action: 'create_folder', path: 'a/b' },
+      { action: 'create_folder', path: 'a/b/' },
+      { action: 'create_folder', path: 'a/x.tex' },
+      { action: 'rename', path: 'a/y.tex', newName: 'x.tex' },
+      { action: 'rename', path: 'a/b', newName: 'y.tex' },
+      { action: 'rename', path: 'a/y.tex', newName: 'y.tex' },
+      { action: 'move', path: 'x.tex', destinationFolderPath: 'a' },
+      { action: 'move', path: 'a/x.tex', destinationFolderPath: '' },
+      { action: 'move', path: 'a/x.tex', destinationFolderPath: 'a' },
+      { action: 'move', path: 'a', destinationFolderPath: 'a' },
+      { action: 'move', path: 'a', destinationFolderPath: 'a/b' },
+    ] as const) {
+      await expect(api.manageEntity('project', input), JSON.stringify(input)).rejects.toMatchObject({
+        code: 'INVALID_ARGUMENT',
+      })
+    }
+    expect(http.postJson).not.toHaveBeenCalled()
+
+    // Names are compared exactly, as Overleaf does.
+    await api.manageEntity('project', { action: 'rename', path: 'a/y.tex', newName: 'X.tex' })
+    await api.manageEntity('project', { action: 'move', path: 'a/b', destinationFolderPath: '' })
+    expect(http.postJson).toHaveBeenCalledTimes(2)
   })
 
   test('uses fileRef routes for binary files and destination folder IDs for moves', async () => {
@@ -194,19 +229,160 @@ describe('entity API', () => {
   })
 
   test('refuses to replace an existing local file unless overwrite is requested', async () => {
-    const { api } = harness()
+    const { api, http } = harness()
     const directory = await mkdtemp(join(tmpdir(), 'overleaf-download-'))
     const target = `${directory}/existing.tex`
     await writeFile(target, 'do not clobber')
 
     await expect(
       api.downloadFile('project', 'chapters/old.tex', target)
-    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT', message: expect.stringMatching(/already exists/u) })
     await expect(readFile(target, 'utf8')).resolves.toBe('do not clobber')
+    // Refused before the entity is fetched, so the refusal costs no request.
+    expect(http.getBytes).not.toHaveBeenCalled()
 
     await expect(
       api.downloadFile('project', 'chapters/old.tex', target, true)
     ).resolves.toMatchObject({ bytes: 3 })
+  })
+
+  test('with overwrite, replaces an existing file through a new one instead of truncating it', async () => {
+    const { api } = harness()
+    const directory = await mkdtemp(join(tmpdir(), 'overleaf-download-'))
+    const target = join(directory, 'existing.tex')
+    await writeFile(target, 'old text')
+    await chmod(target, 0o640)
+    // A second name for the old file: an in-place write would change it too.
+    await link(target, join(directory, 'alias.tex'))
+
+    await expect(api.downloadFile('project', 'chapters/old.tex', target, true)).resolves.toEqual({
+      bytes: 3,
+      localPath: target,
+    })
+    await expect(readFile(target)).resolves.toEqual(Buffer.from([1, 2, 3]))
+    await expect(readFile(join(directory, 'alias.tex'), 'utf8')).resolves.toBe('old text')
+    // The new file keeps the old one's permissions.
+    expect((await lstat(target)).mode & 0o777).toBe(0o640)
+    expect((await readdir(directory)).sort()).toEqual(['alias.tex', 'existing.tex'])
+  })
+
+  test('with overwrite, replaces the file a symbolic link leads to and keeps the link', async () => {
+    const { api } = harness()
+    const directory = await mkdtemp(join(tmpdir(), 'overleaf-download-'))
+    const real = join(directory, 'real.tex')
+    const linked = join(directory, 'linked.tex')
+    await writeFile(real, 'old text')
+    await symlink(real, linked)
+
+    await api.downloadFile('project', 'chapters/old.tex', linked, true)
+
+    expect((await lstat(linked)).isSymbolicLink()).toBe(true)
+    await expect(readFile(real)).resolves.toEqual(Buffer.from([1, 2, 3]))
+    expect((await readdir(directory)).sort()).toEqual(['linked.tex', 'real.tex'])
+  })
+
+  test.skipIf(process.getuid?.() === 0)('with overwrite, refuses an unwritable folder before fetching and keeps the file', async () => {
+    const { api, http } = harness()
+    const directory = await mkdtemp(join(tmpdir(), 'overleaf-download-'))
+    const target = join(directory, 'existing.tex')
+    await writeFile(target, 'old text')
+    await chmod(directory, 0o500)
+    try {
+      await expect(api.downloadFile('project', 'chapters/old.tex', target, true)).rejects.toMatchObject({
+        code: 'INVALID_ARGUMENT',
+        details: { errno: 'EACCES' },
+      })
+      expect(http.getBytes).not.toHaveBeenCalled()
+      await expect(readFile(target, 'utf8')).resolves.toBe('old text')
+    } finally {
+      await chmod(directory, 0o700)
+    }
+  })
+
+  test('refuses a folder at the local path before fetching, even with overwrite', async () => {
+    const { api, http } = harness()
+    const directory = await mkdtemp(join(tmpdir(), 'overleaf-download-'))
+
+    for (const overwrite of [false, true]) {
+      await expect(api.downloadFile('project', 'chapters/old.tex', directory, overwrite)).rejects.toMatchObject({
+        code: 'INVALID_ARGUMENT',
+        message: expect.stringMatching(/is a folder/u),
+      })
+    }
+    expect(http.getBytes).not.toHaveBeenCalled()
+  })
+
+  test('refuses a symbolic link to a folder at the local path before fetching, even with overwrite', async () => {
+    const { api, http } = harness()
+    const directory = await mkdtemp(join(tmpdir(), 'overleaf-download-'))
+    const link = join(directory, 'linked')
+    await symlink(await mkdtemp(join(tmpdir(), 'overleaf-download-')), link)
+
+    for (const overwrite of [false, true]) {
+      await expect(api.downloadFile('project', 'chapters/old.tex', link, overwrite)).rejects.toMatchObject({
+        code: 'INVALID_ARGUMENT',
+        message: expect.stringMatching(/is a folder/u),
+      })
+    }
+    expect(http.getBytes).not.toHaveBeenCalled()
+  })
+
+  test('refuses a symbolic link at the local path without overwrite, even a dangling one', async () => {
+    const { api, http } = harness()
+    const directory = await mkdtemp(join(tmpdir(), 'overleaf-download-'))
+    const link = join(directory, 'link.tex')
+    await symlink(join(directory, 'missing.tex'), link)
+
+    await expect(api.downloadFile('project', 'chapters/old.tex', link)).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+      message: expect.stringMatching(/already exists/u),
+    })
+    expect(http.getBytes).not.toHaveBeenCalled()
+  })
+
+  test('reports a local file that cannot be read by its errno, without the path or the system message', async () => {
+    const { api, http } = harness()
+    const directory = await mkdtemp(join(tmpdir(), 'overleaf-upload-'))
+    const missing = join(directory, 'missing.png')
+
+    const notFound = await api.uploadFile('project', missing).catch((error: unknown) => error)
+    expect(notFound).toMatchObject({ code: 'NOT_FOUND', details: { errno: 'ENOENT' } })
+    const isFolder = await api.uploadFile('project', directory, '', 'folder.png').catch((error: unknown) => error)
+    expect(isFolder).toMatchObject({ code: 'INVALID_ARGUMENT', details: { errno: 'EISDIR' } })
+    for (const error of [notFound, isFolder]) {
+      expect((error as McpError).message).not.toContain(directory)
+      expect((error as McpError).message).not.toMatch(/no such file|illegal operation/iu)
+    }
+    expect(http.postForm).not.toHaveBeenCalled()
+  })
+
+  test('reports a local file that cannot be written by its errno, without the path or the system message', async () => {
+    const { api, http } = harness()
+    const directory = await mkdtemp(join(tmpdir(), 'overleaf-download-'))
+
+    const notFound = await api
+      .downloadFile('project', 'chapters/old.tex', join(directory, 'absent', 'old.tex'))
+      .catch((error: unknown) => error)
+    expect(notFound).toMatchObject({ code: 'NOT_FOUND', details: { errno: 'ENOENT' } })
+    expect((notFound as McpError).message).not.toContain(directory)
+    expect((notFound as McpError).message).not.toMatch(/no such file/iu)
+    expect(http.getBytes).not.toHaveBeenCalled()
+  })
+
+  test.skipIf(process.getuid?.() === 0)('reports an unwritable local folder as an argument error before fetching', async () => {
+    const { api, http } = harness()
+    const directory = await mkdtemp(join(tmpdir(), 'overleaf-download-'))
+    await chmod(directory, 0o500)
+    try {
+      const denied = await api
+        .downloadFile('project', 'chapters/old.tex', join(directory, 'old.tex'))
+        .catch((error: unknown) => error)
+      expect(denied).toMatchObject({ code: 'INVALID_ARGUMENT', details: { errno: 'EACCES' } })
+      expect((denied as McpError).message).not.toContain(directory)
+      expect(http.getBytes).not.toHaveBeenCalled()
+    } finally {
+      await chmod(directory, 0o700)
+    }
   })
 
   test('with ifExists skip, leaves an existing entity untouched and sends nothing', async () => {

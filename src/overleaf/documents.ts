@@ -1,4 +1,5 @@
 import { asMcpError, McpError } from '../core/errors.js'
+import { createOutsideBmpPreservingEdits } from '../core/diff.js'
 import { assertDocumentSize, assertUpdateSize } from '../core/limits.js'
 import { AccessPolicy } from '../core/policy.js'
 import type { FifoQueue } from '../core/queue.js'
@@ -12,6 +13,7 @@ import { normalizeLf } from '../core/text.js'
 import {
   buildHistoryTextOperation,
   buildShareJsOperation,
+  generateIdSeed,
   makeUpdate,
   type HistorySnapshot,
 } from '../protocol/ot.js'
@@ -68,6 +70,17 @@ export interface DocumentsApiOptions {
   currentUserId?: string
   /** Defaults to allowing everything but ids that are not path-safe. */
   policy?: AccessPolicy
+}
+
+/**
+ * The 1-based line in `target` of the first character outside the BMP that a ShareJS write would
+ * have to send. The write edits around one the document already holds, so only a character the
+ * target adds, or moves past another, counts.
+ */
+function insertedOutsideBmpLine(current: string, target: string): number | undefined {
+  const plan = createOutsideBmpPreservingEdits(current, target)
+  if (!('insertedAt' in plan)) return undefined
+  return target.slice(0, plan.insertedAt).split('\n').length
 }
 
 async function safelyLeave(connection: DocumentConnection, docId: string): Promise<void> {
@@ -181,6 +194,18 @@ export class DocumentsApi {
           otVersion: before.version,
           content: before.content,
         })
+        if (before.protocol === 'sharejs') {
+          // The legacy editor replaces each such character with U+FFFD, so the write could never verify.
+          const line = insertedOutsideBmpLine(before.content, target)
+          if (line !== undefined) {
+            await safelyLeave(connection, entity.id)
+            throw new McpError(
+              'INVALID_ARGUMENT',
+              "Overleaf's legacy editor cannot store characters outside the Basic Multilingual Plane, such as emoji, and would replace each with U+FFFD. Replace them, for example with a LaTeX command, and write again. Nothing was sent.",
+              { details: { line } }
+            )
+          }
+        }
 
         const tracking =
           writeMode === 'tracked'
@@ -203,7 +228,7 @@ export class DocumentsApi {
           operation,
           before.protocol,
           writeMode === 'tracked' && before.protocol === 'sharejs'
-            ? { tc: this.#currentUserId }
+            ? { tc: generateIdSeed() }
             : undefined
         )
         assertUpdateSize(update, this.#maxUpdateChars)
@@ -215,12 +240,19 @@ export class DocumentsApi {
           submitError = error
         }
         await safelyLeave(connection, entity.id)
-        if (submitError instanceof McpError && submitError.code === 'TIMEOUT') {
+        // OUTCOME_UNKNOWN means the socket failed after the update was sent, so it may have applied.
+        if (submitError instanceof McpError && ['TIMEOUT', 'OUTCOME_UNKNOWN'].includes(submitError.code)) {
           return { before, trackChangesActive: connection.trackChangesActive, submitError }
         }
         if (submitError) throw asMcpError(submitError)
 
-        const live = await connection.joinDocument(entity.id)
+        let live: JoinedDocument
+        try {
+          live = await connection.joinDocument(entity.id)
+        } catch (error) {
+          // The update applied, so a failed verification read is settled by observation, never a resend.
+          return { before, trackChangesActive: connection.trackChangesActive, submitError: error }
+        }
         await safelyLeave(connection, entity.id)
         return { before, live, trackChangesActive: connection.trackChangesActive }
       })
@@ -249,6 +281,8 @@ export class DocumentsApi {
     }
 
     // Never retry an ambiguous write: observe whether the target, original, or a third state is live.
+    const timedOut = submitted.submitError instanceof McpError && submitted.submitError.code === 'TIMEOUT'
+    const unconfirmed = timedOut ? 'timed out' : 'lost its socket'
     await this.#connections.invalidate?.(projectId)
     const deadline = Date.now() + this.#recoveryTimeoutMs
     let unchangedRecovery: { live: JoinedDocument; trackChangesActive: boolean } | undefined
@@ -274,7 +308,7 @@ export class DocumentsApi {
           contentHash(recovery.live.content) === contentHash(submitted.before.content)
         if (!unchanged) {
           // Any third state may include concurrent work and must be reported as a conflict.
-          throw new McpError('REVISION_CONFLICT', 'Live content changed after the write timed out.', {
+          throw new McpError('REVISION_CONFLICT', `Live content changed after the write ${unconfirmed}.`, {
             retryable: false,
             details: {
               outcome: 'unknown',
@@ -299,12 +333,13 @@ export class DocumentsApi {
 
     if (unchangedRecovery) {
       // Seeing the original revision through the full recovery window proves no application was observed.
-      throw new McpError('TIMEOUT', 'The write timed out and the original revision is still live.', {
-        retryable: false,
-        details: { outcome: 'not_applied' },
-      })
+      throw new McpError(
+        timedOut ? 'TIMEOUT' : 'REMOTE_ERROR',
+        `The write ${unconfirmed} and the original revision is still live.`,
+        { retryable: false, details: { outcome: 'not_applied' } }
+      )
     }
-    throw new McpError('OUTCOME_UNKNOWN', 'Could not observe live content after a timed-out write.', {
+    throw new McpError('OUTCOME_UNKNOWN', `Could not observe live content after the write ${unconfirmed}.`, {
       cause: observationError,
     })
   }

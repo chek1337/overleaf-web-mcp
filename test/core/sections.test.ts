@@ -52,3 +52,118 @@ Body
     expect(result).toContain('\\section{Methods}')
   })
 })
+
+const titles = (input: string): string[] => findSections(input).map(section => section.title)
+
+describe('comment masking', () => {
+  test('treats a percent after a line-break control symbol as a comment', () => {
+    const input = String.raw`\section{A}
+Line break then comment \\% \section{Commented After Linebreak}
+\section{B}
+`
+    expect(titles(input)).toEqual(['A', 'B'])
+    expect(titles('\\section{A}\nx \\\\% \\section{B}')).toEqual(['A'])
+  })
+
+  test('decides an escaped percent by the parity of the backslash run', () => {
+    expect(titles('x \\% \\section{B}')).toEqual(['B'])
+    expect(titles('x \\\\\\% \\section{B}')).toEqual(['B'])
+    expect(titles('x \\\\\\\\% \\section{B}')).toEqual([])
+  })
+
+  test('reads a heading name after a line-break control symbol as text', () => {
+    const input = '\\section{A}\nText line\\\\section{X} more\n\\section{B}\n'
+    expect(titles(input)).toEqual(['A', 'B'])
+    expect(replaceSection(input, 'section:0', 'New body\n')).toBe(
+      '\\section{A}\nNew body\n\\section{B}\n'
+    )
+    // An even run of backslashes before the name leaves a real heading after the line breaks.
+    expect(titles('x\\\\\\section{X}')).toEqual(['X'])
+    expect(titles('x\\\\\\\\section{X}')).toEqual([])
+  })
+
+  test('keeps a section body from ending inside a commented heading line', () => {
+    const input = String.raw`\section{A}
+Line break then comment \\% \section{Hidden}
+\section{B}
+`
+    const [a] = findSections(input)
+    expect(input.slice(a!.bodyStart, a!.end)).toBe(
+      'Line break then comment \\\\% \\section{Hidden}\n'
+    )
+  })
+})
+
+describe('ignored environments', () => {
+  test('reads a percent inside verbatim as text, even on the line of its end', () => {
+    const input = '\\section{A}\n\\begin{verbatim}50% \\end{verbatim}\n\\section{B}\n\\section{C}'
+    const sections = findSections(input)
+
+    expect(sections.map(section => section.title)).toEqual(['A', 'B', 'C'])
+    expect(input.slice(sections[0]!.start, sections[0]!.end)).not.toContain('\\section{B}')
+  })
+
+  test.each(['verbatim', 'verbatim*', 'lstlisting', 'minted', 'comment'])(
+    'masks headings in %s and resumes after its end despite a literal percent',
+    environment => {
+      const input = String.raw`\section{A}
+\begin{${environment}}
+100% \section{Inside}
+x % \end{${environment}}
+\section{B}
+`
+      expect(titles(input)).toEqual(['A', 'B'])
+    }
+  )
+
+  test('does not open an environment from a commented or escaped begin', () => {
+    expect(titles('% \\begin{verbatim}\n\\section{A}')).toEqual(['A'])
+    expect(titles('\\\\begin{verbatim}\n\\section{A}')).toEqual(['A'])
+  })
+
+  test('masks an unterminated ignored environment through the end of the file', () => {
+    expect(titles('\\section{A}\n\\begin{verbatim}\n\\section{B}\n')).toEqual(['A'])
+  })
+})
+
+describe('offsets around astral characters', () => {
+  test('keeps offsets aligned after an astral character in a masked region', () => {
+    const input = '\\begin{verbatim}\u{1F600}\\end{verbatim}\n\\section{A}\nBody\n'
+    const [section] = findSections(input)
+
+    expect(section?.title).toBe('A')
+    expect(section?.start).toBe(input.indexOf('\\section{A}'))
+    expect(replaceSection(input, section!.id, 'New\n')).toBe(
+      '\\begin{verbatim}\u{1F600}\\end{verbatim}\n\\section{A}\nNew\n'
+    )
+  })
+})
+
+describe('inline verbatim', () => {
+  test('masks a heading inside \\verb with any delimiter', () => {
+    expect(titles('\\verb|\\section{V}|')).toEqual([])
+    expect(titles('\\section{A}\nUse \\verb+\\section{V}+ here.\n\\section{B}')).toEqual([
+      'A',
+      'B',
+    ])
+    expect(titles('\\verb*!\\section{V}!\n\\section{B}')).toEqual(['B'])
+  })
+
+  test('reads a percent inside \\verb as text', () => {
+    expect(titles('\\verb|50%| \\section{B}')).toEqual(['B'])
+  })
+
+  test('ends an unclosed \\verb at the end of its line', () => {
+    expect(titles('\\verb|\\section{V}\n\\section{B}')).toEqual(['B'])
+  })
+
+  test('leaves other commands that start with verb alone', () => {
+    expect(titles('\\verbatiminput{x} \\section{B}')).toEqual(['B'])
+  })
+
+  test('masks a heading inside \\lstinline with braces or a delimiter', () => {
+    expect(titles('\\lstinline|\\section{V}| \\section{B}')).toEqual(['B'])
+    expect(titles('\\lstinline[language=TeX]{\\section{V}} \\section{B}')).toEqual(['B'])
+    expect(titles('\\lstinline{50%} \\section{B}')).toEqual(['B'])
+  })
+})

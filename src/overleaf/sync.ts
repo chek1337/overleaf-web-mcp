@@ -106,6 +106,8 @@ export interface SyncFailure {
   action: SyncAction
   errorCode: McpErrorCode
   message: string
+  /** The failed step's own error details, such as `reason`, `status`, or `outcome`. */
+  details?: Record<string, unknown>
 }
 
 export interface SyncDirectoryResult {
@@ -370,6 +372,16 @@ function actionFor(work: UploadWork, writeMode: WriteMode): SyncAction {
     return 'create'
   }
   return 'upload'
+}
+
+function syncFailure(destinationPath: string, action: SyncAction, failure: McpError): SyncFailure {
+  return {
+    destinationPath,
+    action,
+    errorCode: failure.code,
+    message: failure.message,
+    ...(failure.details === undefined ? {} : { details: failure.details }),
+  }
 }
 
 const ACTION_VERBS: Record<SyncAction, string> = {
@@ -1167,6 +1179,7 @@ export class SyncApi {
     const remaining: Array<{ destinationPath: string; action: SyncAction }> = []
     const writtenRevisions = new Map<string, string>()
     const uploadedHashes = new Map<string, string>()
+    const leftovers = new Map<string, string>()
     let halted = false
     // Counts calls that may have changed the project, applied or not, to know what to re-read.
     let attempts = 0
@@ -1189,7 +1202,7 @@ export class SyncApi {
         completed.push({ destinationPath: folder, action: 'create_folder', ...(entityId === undefined ? {} : { entityId }) })
       },
       onFailed: (folder, failure) => {
-        record({ destinationPath: folder, action: 'create_folder', errorCode: failure.code, message: failure.message })
+        record(syncFailure(folder, 'create_folder', failure))
       },
     })
 
@@ -1225,11 +1238,18 @@ export class SyncApi {
       }
       try {
         attempts += 1
-        const entityId = await this.#applyUpload(projectId, work, action, writeMode, writtenRevisions, uploadedHashes)
+        const entityId = await this.#applyUpload(
+          projectId,
+          work,
+          action,
+          writeMode,
+          writtenRevisions,
+          uploadedHashes,
+          leftovers
+        )
         completed.push({ destinationPath: work.destinationPath, action, ...(entityId === undefined ? {} : { entityId }) })
       } catch (error) {
-        const failure = asMcpError(error)
-        record({ destinationPath: work.destinationPath, action, errorCode: failure.code, message: failure.message })
+        record(syncFailure(work.destinationPath, action, asMcpError(error)))
       }
       await report(action)
     }
@@ -1261,8 +1281,7 @@ export class SyncApi {
           await this.#deleteIfUnchanged(projectId, work)
           completed.push({ destinationPath: work.destinationPath, action: 'delete', entityId: work.entityId })
         } catch (error) {
-          const failure = asMcpError(error)
-          record({ destinationPath: work.destinationPath, action: 'delete', errorCode: failure.code, message: failure.message })
+          record(syncFailure(work.destinationPath, 'delete', asMcpError(error)))
         }
         await report('delete')
       }
@@ -1276,7 +1295,7 @@ export class SyncApi {
           plan,
           tree === undefined
             ? plan.snapshot
-            : await this.#expectedSnapshot(plan, completed, tree, writtenRevisions)
+            : await this.#expectedSnapshot(plan, completed, tree, writtenRevisions, leftovers)
         )
       } catch {
         planToken = undefined
@@ -1300,7 +1319,8 @@ export class SyncApi {
     action: SyncAction,
     writeMode: WriteMode,
     writtenRevisions: Map<string, string>,
-    uploadedHashes: Map<string, string>
+    uploadedHashes: Map<string, string>,
+    leftovers: Map<string, string>
   ): Promise<string | undefined> {
     const path = work.destinationPath
     if (action === 'write') {
@@ -1318,7 +1338,19 @@ export class SyncApi {
         )
       }
       // An empty file has nothing to track; it is created as an empty document.
-      const created = await this.#deps.createFile(projectId, path, text, text === '' ? 'untracked' : 'tracked')
+      let created: unknown
+      try {
+        created = await this.#deps.createFile(projectId, path, text, text === '' ? 'untracked' : 'tracked')
+      } catch (error) {
+        if (!(error instanceof McpError) || error.details?.created !== true) throw error
+        leftovers.set(path, normalizeLf(text))
+        // The returned planToken pins the leftover as it is now, so writing it by hand would drift.
+        throw new McpError(
+          error.code,
+          `${error.message} Do not create or write it yourself: resume with the planToken this result returns, which writes it or finds it already in place, or run plan_sync again if none is returned.`,
+          { retryable: error.retryable, details: error.details, cause: error }
+        )
+      }
       const revision = revisionOf(created)
       if (revision !== undefined) writtenRevisions.set(path, revision)
       return undefined
@@ -1422,12 +1454,18 @@ export class SyncApi {
    * The project state a resumed sync should find: the plan's snapshot, with what this sync
    * changed replaced by what the tree now shows. Anything it did not touch keeps its planned
    * state, so a collaborator's change made during the sync still stops the resumed run.
+   *
+   * A create that failed after its document was made leaves that document behind. It counts
+   * as this sync's change only while it is still empty or holds exactly the intended text, so
+   * the resumed run writes it through a revision-checked write; anything else may be someone
+   * else's work and stops the resumed run for review.
    */
   async #expectedSnapshot(
     plan: Plan,
     completed: SyncOutcome[],
     tree: ProjectTree,
-    writtenRevisions: Map<string, string>
+    writtenRevisions: Map<string, string>,
+    leftovers: Map<string, string>
   ): Promise<Map<string, SnapshotEntry>> {
     const expected = new Map(plan.snapshot)
     const byPath = new Map(tree.entities.map(entity => [entity.path, entity]))
@@ -1453,6 +1491,13 @@ export class SyncApi {
         fingerprint = entity.type === 'file' ? (entity.hash ?? '') : ''
       }
       expected.set(path, { type: entity.type, id: entity.id, fingerprint })
+    }
+    for (const [path, intended] of leftovers) {
+      const entity = byPath.get(path)
+      if (entity?.type !== 'doc') continue
+      const document = await this.#deps.readFile(plan.projectId, path)
+      if (document.content !== '' && document.content !== intended) continue
+      expected.set(path, { type: 'doc', id: entity.id, fingerprint: revisionFingerprint(document.revision) })
     }
     return expected
   }

@@ -1,9 +1,9 @@
 import { readFile } from 'node:fs/promises'
-import { basename } from 'node:path'
+import { basename, posix } from 'node:path'
 
 import { z } from 'zod'
 
-import { McpError } from '../core/errors.js'
+import { asMcpError, McpError } from '../core/errors.js'
 import { prepareLocalDownload, writeDownload } from '../core/local-download.js'
 import { AccessPolicy, isPathSafeId } from '../core/policy.js'
 import { ERROR_CODE_PATTERN } from '../http/client.js'
@@ -86,6 +86,9 @@ export interface ProjectSettings {
 /** Overleaf's own limit on project names, enforced client-side to fail before the request. */
 const MAX_PROJECT_NAME_LENGTH = 150
 
+/** Overleaf's default `validRootDocExtensions`, matched case-insensitively as Overleaf does. */
+const ROOT_DOC_EXTENSION = /^\.(?:tex|ltx|rtex|rnw)$/iu
+
 /** Overleaf reports zip import rejections as HTTP 422 with a machine-readable code. */
 const ZIP_ERRORS: Record<string, string> = {
   invalid_zip_file: 'Overleaf could not read the archive as a zip file.',
@@ -141,6 +144,20 @@ function zipFailure(error: unknown): McpError {
     'INVALID_ARGUMENT',
     detail ?? 'Overleaf rejected the zip archive.',
     code === undefined ? {} : { details: { overleafError: code } }
+  )
+}
+
+/** Read-back failure codes an import keeps, since each means the same as for any other call. */
+const READ_BACK_CODES_KEPT: ReadonlySet<string> = new Set(['AUTH_EXPIRED', 'POLICY_DENIED', 'TIMEOUT'])
+
+/** Keeps the failure's code and details and adds which settings were stored before it. */
+function partialSettingsFailure(error: unknown, applied: string[], failed: string): McpError {
+  const cause = asMcpError(error)
+  const stored = applied.length === 0 ? 'No setting was' : `${applied.join(', ')} ${applied.length === 1 ? 'was' : 'were'}`
+  return new McpError(
+    cause.code,
+    `${cause.message} ${stored} applied before the request for ${failed} failed, and no later setting was sent.`,
+    { retryable: cause.retryable, details: { ...cause.details, applied: [...applied], failed }, cause }
   )
 }
 
@@ -239,7 +256,8 @@ export class ProjectsApi {
     }
     const projectName = name ?? fileName.replace(/\.zip$/iu, '')
     validateProjectName(projectName)
-    this.#policy.assertEffect('project-lifecycle')
+    // The stored name is read back afterwards, so that read is allowed before anything is uploaded.
+    this.#policy.assertEffect('project-lifecycle', 'overleaf-read')
     const readPath = await this.#policy.resolveLocalRead(localZipPath)
     const bytes = await readFile(readPath).catch((error: unknown) => {
       throw new McpError('NOT_FOUND', `Local file could not be read: ${localZipPath}`, {
@@ -271,7 +289,23 @@ export class ProjectsApi {
     const body = response as { success?: boolean; error?: unknown } | null
     if (body?.success === false) throw zipFailure(body.error)
     const projectId = this.#parseCreated(response, 'project import')
-    return { projectId, name: projectName, url: this.#projectUrl(projectId) }
+    // Overleaf names the project after the root document's \title when it has one, and adds
+    // " (n)" to a name the account already uses, so only a read-back tells the stored name.
+    let stored: { name: string }
+    try {
+      stored = await this.#options.findProject(projectId)
+    } catch (error) {
+      // The project exists now, so the error is never retryable: retrying the import would create
+      // a second project. Only codes that mean the same here as for any call are kept; this tool's
+      // NOT_FOUND and RATE_LIMITED say nothing was created.
+      const kept = error instanceof McpError && READ_BACK_CODES_KEPT.has(error.code) ? error : undefined
+      throw new McpError(
+        kept?.code ?? 'REMOTE_ERROR',
+        `The project was imported, but its stored name could not be read${kept === undefined ? '.' : `: ${kept.message}`} Do not import it again; call list_projects or get_project_tree with the projectId in details.`,
+        { retryable: false, details: { ...kept?.details, projectId }, cause: error }
+      )
+    }
+    return { projectId, name: stored.name, url: this.#projectUrl(projectId) }
   }
 
   /**
@@ -391,24 +425,46 @@ export class ProjectsApi {
     this.#policy.assertProject(projectId)
     // The settings are re-read afterwards, so that read is allowed before anything is changed.
     this.#policy.assertEffect('project-lifecycle', 'overleaf-read')
-    const body: Record<string, string> = {}
-    if (settings.rootFilePath !== undefined) {
-      body.rootDocId = (await this.#options.resolvePath(projectId, settings.rootFilePath, 'doc')).id
+    if (settings.rootFilePath !== undefined && !ROOT_DOC_EXTENSION.test(posix.extname(settings.rootFilePath))) {
+      throw new McpError(
+        'INVALID_ARGUMENT',
+        'rootFilePath must name a .tex, .ltx, .Rtex, or .Rnw document; Overleaf compiles no other root. Nothing was changed.'
+      )
     }
-    if (settings.compiler !== undefined) body.compiler = settings.compiler
-    if (settings.imageName !== undefined) body.imageName = settings.imageName
+    // Overleaf applies a settings request field by field in this order and stops at the first
+    // failure with a bare HTTP 500, so one request per field tells which ones were stored.
+    const updates: Array<{ setting: keyof ProjectSettingsInput; body: Record<string, string> }> = []
+    if (settings.compiler !== undefined) updates.push({ setting: 'compiler', body: { compiler: settings.compiler } })
+    if (settings.imageName !== undefined) {
+      updates.push({ setting: 'imageName', body: { imageName: settings.imageName } })
+    }
     if (settings.spellCheckLanguage !== undefined) {
-      body.spellCheckLanguage = settings.spellCheckLanguage
+      updates.push({ setting: 'spellCheckLanguage', body: { spellCheckLanguage: settings.spellCheckLanguage } })
     }
-    if (Object.keys(body).length === 0) {
+    if (settings.rootFilePath !== undefined) {
+      const rootDocId = (await this.#options.resolvePath(projectId, settings.rootFilePath, 'doc')).id
+      updates.push({ setting: 'rootFilePath', body: { rootDocId } })
+    }
+    if (updates.length === 0) {
       throw new McpError(
         'INVALID_ARGUMENT',
         'Provide at least one of rootFilePath, compiler, imageName, or spellCheckLanguage.'
       )
     }
-    await this.#options.http.postJson(`/project/${encodeURIComponent(projectId)}/settings`, body)
-    // The cached join snapshot never learns about settings changes; re-join to report the truth.
-    await this.#options.invalidate(projectId)
+    const applied: string[] = []
+    try {
+      for (const update of updates) {
+        try {
+          await this.#options.http.postJson(`/project/${encodeURIComponent(projectId)}/settings`, update.body)
+        } catch (error) {
+          throw partialSettingsFailure(error, applied, update.setting)
+        }
+        applied.push(update.setting)
+      }
+    } finally {
+      // The cached join snapshot never learns about settings changes, applied in full or in part.
+      await this.#options.invalidate(projectId)
+    }
     const tree = await this.#options.getProjectTree(projectId)
     return {
       projectId,

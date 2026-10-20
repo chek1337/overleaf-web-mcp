@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
 
 import { readConfig } from '../src/config.js'
+import { McpError } from '../src/core/errors.js'
 import { gitBlobHash } from '../src/core/hash.js'
 import { AccessPolicy } from '../src/core/policy.js'
 import type { RawFolder } from '../src/overleaf/tree.js'
@@ -102,6 +103,39 @@ describe('runtime bootstrap', () => {
       runtime.createFile('project', 'chapter.tex', '', 'tracked')
     ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' })
     expect(entities.createEmptyFile).not.toHaveBeenCalled()
+  })
+
+  test('says the document now exists when its content write fails after creating it', async () => {
+    const { runtime, entities, documents } = runtimeWithWrites()
+    documents.writeFile.mockRejectedValueOnce(
+      new McpError('TIMEOUT', 'The write timed out and the original revision is still live.', {
+        details: { outcome: 'not_applied' },
+      })
+    )
+
+    const failure = await runtime
+      .createFile('project', 'chapter.tex', 'Tracked content', 'tracked')
+      .catch((error: unknown) => error)
+
+    expect(failure).toMatchObject({
+      code: 'TIMEOUT',
+      retryable: false,
+      details: { outcome: 'not_applied', created: true },
+    })
+    expect((failure as McpError).message).toContain('write_file')
+    expect((failure as McpError).message).not.toContain('chapter.tex')
+    expect(entities.createEmptyFile).toHaveBeenCalledTimes(1)
+  })
+
+  test('says the document now exists when reading it back after creating it fails', async () => {
+    const { runtime, documents } = runtimeWithWrites()
+    documents.readFile.mockRejectedValueOnce(new McpError('OUTCOME_UNKNOWN', 'Overleaf socket is not connected.'))
+
+    await expect(runtime.createFile('project', 'chapter.tex', '')).rejects.toMatchObject({
+      code: 'OUTCOME_UNKNOWN',
+      details: { created: true },
+    })
+    expect(documents.writeFile).not.toHaveBeenCalled()
   })
 
   test('rejects tracked file creation without a user identity before creating an entity', async () => {
@@ -223,6 +257,83 @@ describe('folder sync through the real runtime', () => {
       const again = await runtime.sync.planSync('p', local)
       expect(again).toMatchObject({ toUpload: [], remoteOnly: [], identical: { count: 2 } })
       expect(again.planToken).toBe(result.planToken)
+    } finally {
+      await runtime.close()
+    }
+  })
+
+  test('tells a sync to resume a create that left a document behind, not to write it by hand', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'overleaf-runtime-sync-'))
+    const cookiePath = join(directory, 'cookies.txt')
+    await writeFile(
+      cookiePath,
+      '# Netscape HTTP Cookie File\n.overleaf.test\tTRUE\t/\tTRUE\t2147483647\toverleaf.sid\tsession\n'
+    )
+    if (process.platform !== 'win32') await chmod(cookiePath, 0o600)
+    const local = await mkdtemp(join(tmpdir(), 'overleaf-runtime-local-'))
+    await writeFile(join(local, 'intro.tex'), 'intro\n')
+    const root: RawFolder = { _id: 'root', name: 'rootFolder', docs: [] }
+
+    const runtime = await OverleafRuntime.create(
+      readConfig({ OVERLEAF_COOKIE_JAR_FILE: cookiePath, OVERLEAF_BASE_URL: 'https://overleaf.test' }),
+      {
+        fetcher: async (input, init) => {
+          const url = new URL(String(input))
+          const method = init?.method ?? 'GET'
+          if (method === 'GET' && url.pathname === '/project') {
+            return new Response('<meta name="ol-csrfToken" content="csrf"><meta name="ol-user_id" content="user">')
+          }
+          if (method === 'POST' && url.pathname === '/project/p/doc') {
+            root.docs!.push({ _id: 'd1', name: 'intro.tex' })
+            return new Response(JSON.stringify({ _id: 'd1', name: 'intro.tex' }), {
+              headers: { 'content-type': 'application/json' },
+            })
+          }
+          throw new Error(`unexpected ${method} ${url.pathname}`)
+        },
+        connectionFactory: async projectId => {
+          const peer = {
+            on() {
+              return peer
+            },
+            once() {
+              return peer
+            },
+            removeListener() {
+              return peer
+            },
+            call: async (name: string) => {
+              if (name === 'joinDoc') return [null, [''], 1, null, {}, 'sharejs-text-ot']
+              return name === 'applyOtUpdate' ? [{ message: 'refused' }] : [null]
+            },
+            close() {},
+          }
+          return new ProjectConnection({
+            projectId,
+            peer,
+            join: {
+              publicId: 'public',
+              project: { _id: projectId, rootFolder: [structuredClone(root)] },
+              permissionsLevel: 'owner',
+              protocolVersion: 2,
+            },
+            supportedProtocolVersions: [2],
+          })
+        },
+      }
+    )
+
+    try {
+      const result = await runtime.sync.syncDirectory('p', local, {
+        mode: 'additive',
+        unplanned: true,
+        writeMode: 'tracked',
+      })
+      expect(result.failed).toHaveLength(1)
+      expect(result.failed[0]).toMatchObject({ action: 'create', errorCode: 'REMOTE_ERROR', details: { created: true } })
+      expect(result.failed[0]!.message).toContain('planToken')
+      expect(result.failed[0]!.message).not.toContain('read_file')
+      expect(result.planToken).toBeDefined()
     } finally {
       await runtime.close()
     }

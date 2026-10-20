@@ -1,5 +1,7 @@
 export interface ClosableConnection {
   close(): void | Promise<void>
+  /** True once the connection can carry no further call. */
+  readonly closed?: boolean
 }
 
 interface CacheEntry<T> {
@@ -64,21 +66,21 @@ export class ProjectConnectionCache<T extends ClosableConnection> {
 
   async invalidate(projectId: string): Promise<void> {
     while (true) {
-      const value = await this.#locked(() => {
+      const step = await this.#locked(() => {
         const entry = this.#entries.get(projectId)
-        if (!entry) return null
-        if (entry.active > 0) return undefined
+        if (!entry) return { done: true as const }
+        if (entry.active > 0) return { slot: this.#slotFreed() }
         if (entry.idleTimer) clearTimeout(entry.idleTimer)
         this.#entries.delete(projectId)
-        return entry.value
+        return { value: entry.value }
       })
-      if (value === null) return
-      if (value !== undefined) {
-        await value.close()
+      if ('done' in step) return
+      if ('value' in step) {
+        await step.value.close()
         this.#notifySlot()
         return
       }
-      await new Promise<void>(resolve => this.#slotWaiters.push(resolve))
+      await step.slot
     }
   }
 
@@ -86,7 +88,14 @@ export class ProjectConnectionCache<T extends ClosableConnection> {
     while (true) {
       const acquired = await this.#locked(async () => {
         const existing = this.#entries.get(projectId)
-        if (existing) {
+        if (existing?.value.closed === true) {
+          // Overleaf closed this socket; a call still holding it finishes on its own, and its release is a no-op.
+          if (existing.idleTimer) clearTimeout(existing.idleTimer)
+          this.#entries.delete(projectId)
+          // The holder's release will not notify, so pending invalidates and capacity waits are woken here.
+          this.#notifySlot()
+          await existing.value.close()
+        } else if (existing) {
           if (existing.idleTimer) clearTimeout(existing.idleTimer)
           existing.idleTimer = undefined
           existing.active += 1
@@ -99,10 +108,12 @@ export class ProjectConnectionCache<T extends ClosableConnection> {
           const idle = [...this.#entries.entries()]
             .filter(([, entry]) => entry.active === 0)
             .sort((left, right) => left[1].lastUsed - right[1].lastUsed)[0]
-          if (!idle) return undefined
+          if (!idle) return { slot: this.#slotFreed() }
           const [idleId, idleEntry] = idle
           if (idleEntry.idleTimer) clearTimeout(idleEntry.idleTimer)
           this.#entries.delete(idleId)
+          // If the factory then throws, the freed slot would otherwise go unannounced.
+          this.#notifySlot()
           await idleEntry.value.close()
         }
 
@@ -116,9 +127,9 @@ export class ProjectConnectionCache<T extends ClosableConnection> {
         this.#entries.set(projectId, entry)
         return entry
       })
-      if (acquired) return acquired
+      if (!('slot' in acquired)) return acquired
       // Capacity is fully active; wait until a release makes an idle slot available.
-      await new Promise<void>(resolve => this.#slotWaiters.push(resolve))
+      await acquired.slot
     }
   }
 
@@ -149,9 +160,17 @@ export class ProjectConnectionCache<T extends ClosableConnection> {
     this.#notifySlot()
   }
 
+  // Registered while the lock is held, so a notify from the next locked operation cannot be missed.
+  #slotFreed(): Promise<void> {
+    return new Promise<void>(resolve => this.#slotWaiters.push(resolve))
+  }
+
+  // Wakes every waiter: each re-checks under the lock and parks again if it still cannot proceed.
+  // Waking one could hand the wakeup to a waiter that cannot use it and strand the rest.
   #notifySlot(): void {
-    const waiter = this.#slotWaiters.shift()
-    waiter?.()
+    const waiters = this.#slotWaiters
+    this.#slotWaiters = []
+    for (const waiter of waiters) waiter()
   }
 
   async #locked<R>(operation: () => Promise<R> | R): Promise<R> {

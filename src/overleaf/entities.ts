@@ -1,8 +1,10 @@
-import { readFile, writeFile } from 'node:fs/promises'
-import { basename, posix } from 'node:path'
+import { constants } from 'node:fs'
+import { access, lstat, readFile, realpath, stat, writeFile } from 'node:fs/promises'
+import { basename, dirname, posix } from 'node:path'
 
 import { McpError } from '../core/errors.js'
 import { gitBlobHash } from '../core/hash.js'
+import { localFileFailure, replaceFileAtomically } from '../core/local-download.js'
 import { AccessPolicy } from '../core/policy.js'
 import type { FifoQueue } from '../core/queue.js'
 import { ERROR_CODE_PATTERN } from '../http/client.js'
@@ -145,9 +147,28 @@ function validateName(name: string): void {
   }
 }
 
+function localFileExists(localPath: string, cause?: unknown): McpError {
+  return new McpError(
+    'INVALID_ARGUMENT',
+    `${localPath} already exists. Pass overwrite: true to replace it.`,
+    cause === undefined ? {} : { cause }
+  )
+}
+
 function resolveFolderId(connection: TreeConnection, path: string): string {
   if (path === '') return connection.rootFolderId
   return resolveProjectPath(connection.getTree(), path, 'folder').id
+}
+
+/** Overleaf refuses a second entity with the same name in one folder, comparing names exactly. */
+function assertPathFree(connection: TreeConnection, path: string): void {
+  const taken = connection.getTree().find(entity => entity.path === path)
+  if (taken !== undefined) {
+    throw new McpError(
+      'INVALID_ARGUMENT',
+      `The project already holds a ${describeEntity(taken)} at ${path}, and a folder cannot hold two entities with the same name. Nothing was changed.`
+    )
+  }
 }
 
 export class EntitiesApi {
@@ -227,6 +248,8 @@ export class EntitiesApi {
           const name = posix.basename(normalized)
           validateName(name)
           const parentFolderId = resolveFolderId(connection, parentPath(normalized))
+          // Joined again, since a trailing slash survives normalizing and no tree path ends in one.
+          assertPathFree(connection, posix.join(parentPath(normalized), name))
           const created = await this.#http.postJson(`/project/${project}/folder`, {
             parent_folder_id: parentFolderId,
             name,
@@ -244,6 +267,7 @@ export class EntitiesApi {
         const route = `/project/${project}/${endpointType(entity)}/${encodeURIComponent(entity.id)}`
         if (input.action === 'rename') {
           validateName(input.newName)
+          assertPathFree(connection, posix.join(parentPath(normalized), input.newName))
           await this.#http.postJson(`${route}/rename`, {
             name: input.newName,
           })
@@ -255,12 +279,17 @@ export class EntitiesApi {
           }
         }
         if (input.action === 'move') {
-          const folderId = resolveFolderId(
-            connection,
-            input.destinationFolderPath === ''
-              ? ''
-              : normalizeProjectPath(input.destinationFolderPath)
-          )
+          const destination =
+            input.destinationFolderPath === '' ? '' : normalizeProjectPath(input.destinationFolderPath)
+          const folderId = resolveFolderId(connection, destination)
+          if (entity.type === 'folder' && (destination === normalized || destination.startsWith(`${normalized}/`))) {
+            throw new McpError(
+              'INVALID_ARGUMENT',
+              `${normalized} cannot be moved into itself or one of its own folders. Nothing was changed.`
+            )
+          }
+          // Moving into the folder that already holds it collides with itself, as Overleaf also judges it.
+          assertPathFree(connection, destination === '' ? entity.name : `${destination}/${entity.name}`)
           await this.#http.postJson(`${route}/move`, {
             folder_id: folderId,
           })
@@ -313,7 +342,9 @@ export class EntitiesApi {
   ): Promise<UploadedFile | SkippedUpload> {
     this.#policy.assertProject(projectId)
     this.#policy.assertEffect('overleaf-write')
-    const bytes = await readFile(await this.#policy.resolveLocalRead(localPath))
+    const bytes = await readFile(await this.#policy.resolveLocalRead(localPath)).catch((error: unknown) => {
+      throw localFileFailure(error, 'read')
+    })
     const name = destinationName ?? basename(localPath)
     validateName(name)
     const folderPath = destinationFolderPath === '' ? '' : normalizeProjectPath(destinationFolderPath)
@@ -430,6 +461,33 @@ export class EntitiesApi {
     this.#policy.assertEffect('overleaf-read')
     // Checked before anything is fetched, so a refused path costs no request.
     const writePath = await this.#policy.resolveLocalWrite(localPath)
+    // lstat, so a symbolic link here counts as existing, as it does for the 'wx' write below.
+    const existing = await lstat(writePath).catch((error: unknown) => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+      throw localFileFailure(error, 'written')
+    })
+    // A link is followed for this check alone; a dangling one still counts as existing above.
+    const followed = existing?.isSymbolicLink() === true ? await stat(writePath).catch(() => undefined) : existing
+    if (followed?.isDirectory() === true) {
+      throw new McpError('INVALID_ARGUMENT', `${localPath} is a folder; name the file to write.`)
+    }
+    if (existing !== undefined && !overwrite) throw localFileExists(localPath)
+    // An existing file is replaced through a new one beside it, never truncated in place. A link
+    // is replaced at the file it leads to, which is where the policy judged the write.
+    let replaced: string | undefined
+    if (followed?.isFile() === true) {
+      replaced = existing?.isSymbolicLink() === true
+        ? await realpath(writePath).catch((error: unknown) => {
+          throw localFileFailure(error, 'written')
+        })
+        : writePath
+    }
+    if (existing === undefined || replaced !== undefined) {
+      // The folder must exist and be writable; the write below stays the final word.
+      await access(dirname(replaced ?? writePath), constants.W_OK).catch((error: unknown) => {
+        throw localFileFailure(error, 'written')
+      })
+    }
     const bytes = await this.#connections.withConnection(projectId, async connection =>
       await connection.queue.run(async () => {
         const entity = resolveProjectPath(connection.getTree(), filePath)
@@ -445,17 +503,14 @@ export class EntitiesApi {
       })
     )
     try {
-      // 'wx' fails rather than truncating a file the caller did not mean to replace.
-      await writeFile(writePath, bytes, overwrite ? undefined : { flag: 'wx' })
+      if (replaced !== undefined) await replaceFileAtomically(replaced, bytes, followed?.mode)
+      // 'wx' fails rather than truncating a file that appeared since the check above.
+      else await writeFile(writePath, bytes, overwrite ? undefined : { flag: 'wx' })
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
-        throw new McpError(
-          'INVALID_ARGUMENT',
-          `${localPath} already exists. Pass overwrite: true to replace it.`,
-          { cause: error }
-        )
+      if (replaced === undefined && (error as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw localFileExists(localPath, error)
       }
-      throw error
+      throw localFileFailure(error, 'written')
     }
     return { bytes: bytes.byteLength, localPath }
   }

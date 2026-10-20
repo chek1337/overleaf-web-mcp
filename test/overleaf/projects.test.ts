@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
 
 import { McpError } from '../../src/core/errors.js'
+import { AccessPolicy } from '../../src/core/policy.js'
 import { ProjectsApi } from '../../src/overleaf/projects.js'
 import type { ProjectEntity, ProjectTree } from '../../src/overleaf/tree.js'
 
@@ -16,7 +17,9 @@ const rootDoc: ProjectEntity = {
   parentFolderId: 'root',
 }
 
-function harness(overrides: { name?: string; trashed?: boolean; archived?: boolean } = {}) {
+function harness(
+  overrides: { name?: string; trashed?: boolean; archived?: boolean; policy?: AccessPolicy } = {}
+) {
   const calls: string[] = []
   const http = {
     postJson: vi.fn(async () => ({ project_id: 'new' })),
@@ -51,6 +54,7 @@ function harness(overrides: { name?: string; trashed?: boolean; archived?: boole
     invalidate: vi.fn(async () => {
       calls.push('invalidate')
     }),
+    policy: overrides.policy,
   }
   return { api: new ProjectsApi(options), http, options, calls }
 }
@@ -110,7 +114,7 @@ describe('projects API', () => {
 
   describe('zip import', () => {
     test('uploads the archive as multipart with the project name defaulting to the file name', async () => {
-      const { api, http } = harness()
+      const { api, http, options } = harness({ name: 'My Paper' })
       const dir = await mkdtemp(join(tmpdir(), 'olzip-'))
       const zipPath = join(dir, 'My Paper.zip')
       await writeFile(zipPath, new Uint8Array([0x50, 0x4b, 0x03, 0x04]))
@@ -124,6 +128,70 @@ describe('projects API', () => {
       expect(path).toBe('/project/new/upload')
       expect(form.get('name')).toBe('My Paper')
       expect((form.get('qqfile') as File).name).toBe('My Paper.zip')
+      expect(options.findProject).toHaveBeenCalledWith('imported')
+    })
+
+    test('reports the name Overleaf stored, which may come from the root document title', async () => {
+      const { api } = harness({ name: 'A Study of Things (1)' })
+      const dir = await mkdtemp(join(tmpdir(), 'olzip-'))
+      const zipPath = join(dir, 'paper.zip')
+      await writeFile(zipPath, new Uint8Array([0x50, 0x4b, 0x03, 0x04]))
+
+      await expect(api.importProjectZip(zipPath, 'Requested')).resolves.toMatchObject({
+        projectId: 'imported',
+        name: 'A Study of Things (1)',
+      })
+    })
+
+    test('hands back the new projectId when the stored name cannot be read after the import', async () => {
+      const { api, options, http } = harness()
+      const dir = await mkdtemp(join(tmpdir(), 'olzip-'))
+      const zipPath = join(dir, 'paper.zip')
+      await writeFile(zipPath, new Uint8Array([0x50, 0x4b, 0x03, 0x04]))
+
+      // The read-back's own code is kept, but the import has happened, so it is never retryable.
+      options.findProject.mockRejectedValueOnce(new McpError('TIMEOUT', 'slow', { retryable: true }))
+      await expect(api.importProjectZip(zipPath)).rejects.toMatchObject({
+        code: 'TIMEOUT',
+        retryable: false,
+        message: expect.stringMatching(/was imported/u),
+        details: { projectId: 'imported' },
+      })
+      options.findProject.mockRejectedValueOnce(
+        new McpError('AUTH_EXPIRED', 'signed out', { details: { reason: 'session' } })
+      )
+      await expect(api.importProjectZip(zipPath)).rejects.toMatchObject({
+        code: 'AUTH_EXPIRED',
+        retryable: false,
+        details: { reason: 'session', projectId: 'imported' },
+      })
+      // This tool's NOT_FOUND and RATE_LIMITED say nothing was created, so they are not kept.
+      for (const cause of [
+        new Error('socket hang up'),
+        new McpError('NOT_FOUND', 'missing'),
+        new McpError('RATE_LIMITED', 'Wait before retrying.', { retryable: true, details: { retryAfterMs: 5 } }),
+      ]) {
+        options.findProject.mockRejectedValueOnce(cause)
+        const error = await api.importProjectZip(zipPath).catch((caught: unknown) => caught)
+        expect(error).toMatchObject({ code: 'REMOTE_ERROR', retryable: false })
+        expect((error as McpError).details).toEqual({ projectId: 'imported' })
+        expect((error as McpError).message).not.toMatch(/socket hang up|missing|retrying/u)
+      }
+      expect(http.postForm).toHaveBeenCalledTimes(5)
+    })
+
+    test('refuses an import whose name read-back the policy forbids, before uploading', async () => {
+      const policy = await AccessPolicy.create({ allowedEffects: ['project-lifecycle', 'local-read'] })
+      const { api, http } = harness({ policy })
+      const dir = await mkdtemp(join(tmpdir(), 'olzip-'))
+      const zipPath = join(dir, 'paper.zip')
+      await writeFile(zipPath, new Uint8Array([0x50, 0x4b, 0x03, 0x04]))
+
+      await expect(api.importProjectZip(zipPath)).rejects.toMatchObject({
+        code: 'POLICY_DENIED',
+        details: { effect: 'overleaf-read' },
+      })
+      expect(http.postForm).not.toHaveBeenCalled()
     })
 
     test('rejects a non-zip path before reading it and reports a missing file as NOT_FOUND', async () => {
@@ -233,7 +301,7 @@ describe('projects API', () => {
       expect(http.postJson).not.toHaveBeenCalled()
     })
 
-    test('resolves rootFilePath to a document id, posts only the given keys, and re-reads the project', async () => {
+    test('resolves rootFilePath to a document id, posts each given key on its own, and re-reads the project', async () => {
       const { api, http, options, calls } = harness()
 
       await expect(
@@ -246,9 +314,75 @@ describe('projects API', () => {
         spellCheckLanguage: 'en',
       })
       expect(options.resolvePath).toHaveBeenCalledWith('p', 'main.tex', 'doc')
-      expect(http.postJson).toHaveBeenCalledWith('/project/p/settings', { rootDocId: 'doc', compiler: 'xelatex' })
+      // Overleaf's own order: compiler, imageName, spellCheckLanguage, then the root document.
+      expect(http.postJson.mock.calls).toEqual([
+        ['/project/p/settings', { compiler: 'xelatex' }],
+        ['/project/p/settings', { rootDocId: 'doc' }],
+      ])
       // The cached join never learns about settings changes, so the re-read must follow an invalidate.
       expect(calls).toEqual(['invalidate', 'tree'])
+    })
+
+    test('names the settings applied before one fails and drops the cached join', async () => {
+      const { api, http, options } = harness()
+      http.postJson
+        .mockResolvedValueOnce({} as never)
+        .mockResolvedValueOnce({} as never)
+        .mockRejectedValueOnce(
+          new McpError('REMOTE_ERROR', 'Overleaf returned HTTP 500.', {
+            details: { status: 500, path: '/project/p/settings' },
+          })
+        )
+
+      const failure = api.updateProjectSettings('p', {
+        rootFilePath: 'main.tex',
+        compiler: 'lualatex',
+        imageName: 'texlive-full:2025.1',
+        spellCheckLanguage: 'fr',
+      })
+      await expect(failure).rejects.toMatchObject({
+        code: 'REMOTE_ERROR',
+        retryable: false,
+        details: {
+          status: 500,
+          path: '/project/p/settings',
+          applied: ['compiler', 'imageName'],
+          failed: 'spellCheckLanguage',
+        },
+      })
+      // Nothing after the failed setting is sent.
+      expect(http.postJson).toHaveBeenCalledTimes(3)
+      expect(options.invalidate).toHaveBeenCalledTimes(1)
+      expect(options.getProjectTree).not.toHaveBeenCalled()
+    })
+
+    test('keeps the code and retryability of a failure on the first setting', async () => {
+      const { api, http, options } = harness()
+      http.postJson.mockRejectedValueOnce(new McpError('TIMEOUT', 'slow', { retryable: true }))
+
+      await expect(api.updateProjectSettings('p', { imageName: 'texlive-full:2025.1' })).rejects.toMatchObject({
+        code: 'TIMEOUT',
+        retryable: true,
+        details: { applied: [], failed: 'imageName' },
+      })
+      expect(options.invalidate).toHaveBeenCalledTimes(1)
+    })
+
+    test('refuses a root document Overleaf cannot compile before any request', async () => {
+      const { api, http, options } = harness()
+
+      for (const rootFilePath of ['refs.bib', 'chapters/intro.sty', 'README', '.tex']) {
+        await expect(api.updateProjectSettings('p', { rootFilePath, compiler: 'xelatex' })).rejects.toMatchObject({
+          code: 'INVALID_ARGUMENT',
+        })
+      }
+      expect(options.resolvePath).not.toHaveBeenCalled()
+      expect(http.postJson).not.toHaveBeenCalled()
+
+      for (const rootFilePath of ['a.tex', 'b.ltx', 'c.Rtex', 'd.Rnw', 'E.TEX', 'sub/f.rnw']) {
+        await api.updateProjectSettings('p', { rootFilePath })
+      }
+      expect(options.resolvePath).toHaveBeenCalledTimes(6)
     })
 
     test('sends an empty spellCheckLanguage to turn spell checking off', async () => {

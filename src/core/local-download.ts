@@ -64,6 +64,50 @@ function localWriteFailure(error: unknown, localPath: string): McpError {
 }
 
 /**
+ * A local file-system failure typed by its errno code alone: a missing file or folder is
+ * `NOT_FOUND`, anything else `INVALID_ARGUMENT`. The message never carries the path or the
+ * operating system's text, which names the resolved path.
+ */
+export function localFileFailure(error: unknown, action: 'read' | 'written'): McpError {
+  if (error instanceof McpError) return error
+  const code = errnoCode(error)
+  const known = code !== undefined && ERRNO_PATTERN.test(code)
+  return new McpError(
+    code === 'ENOENT' ? 'NOT_FOUND' : 'INVALID_ARGUMENT',
+    `The local file could not be ${action}${known ? ` (${code})` : ''}.`,
+    { cause: error, ...(known ? { details: { errno: code } } : {}) }
+  )
+}
+
+function temporaryBeside(path: string): string {
+  // Only unique within the folder; the destination's name is left out so a long one still fits.
+  return join(dirname(path), `.download-${randomBytes(6).toString('hex')}.part`)
+}
+
+/**
+ * Replaces the file at `path` with `bytes` through a temporary file in the same folder renamed
+ * over it, so a write that fails leaves the old file whole. `mode`, the old file's, carries its
+ * permission bits over. Errors are the file system's own, and the temporary file is removed on
+ * failure.
+ */
+export async function replaceFileAtomically(path: string, bytes: Uint8Array, mode?: number): Promise<void> {
+  const temporary = temporaryBeside(path)
+  const handle = await open(temporary, 'wx', 0o600)
+  try {
+    try {
+      if (mode !== undefined) await handle.chmod(mode & 0o7777)
+      await handle.writeFile(bytes)
+    } finally {
+      await handle.close()
+    }
+    await rename(temporary, path)
+  } catch (error) {
+    await unlink(temporary).catch(() => undefined)
+    throw error
+  }
+}
+
+/**
  * Checks a local destination before any request: its folder must exist and be writable, and an
  * existing file is replaced only with `overwrite`. The temporary file is created here, so a
  * folder that cannot be written fails before anything is sent. Whether the destination exists is
@@ -86,8 +130,7 @@ export async function prepareLocalDownload(
     throw new McpError('INVALID_ARGUMENT', `${localPath} is a folder; name the file to write.`)
   }
   if (existing !== undefined && !overwrite) throw existsMismatch(localPath)
-  // Only unique within the folder; the destination's name is left out so a long one still fits.
-  const temporary = join(dirname(path), `.download-${randomBytes(6).toString('hex')}.part`)
+  const temporary = temporaryBeside(path)
   const handle = await open(temporary, 'wx').catch((error: unknown) => {
     throw localWriteFailure(error, localPath)
   })
