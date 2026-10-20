@@ -4,10 +4,10 @@ All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0.0, tool schemas and
 result shapes may change in a minor or patch release; each such change is listed below.
 
-## [0.6.1] - 2026-10-19
+## [0.6.1] - 2026-10-20
 
-A refreshed README and package description. No tool was added, removed, or changed in schema or
-result shape; the server still registers 31 tools.
+A refreshed README and package description, and a session deadline that no longer drifts. No tool
+was added, removed, or changed in schema or result shape; the server still registers 31 tools.
 
 ### Changed
 
@@ -18,6 +18,14 @@ result shape; the server still registers 31 tools.
 - The npm download-count badge, an all-time total refreshed weekly, is labelled `installs`.
 - Dependencies are refreshed within their declared ranges, which clears every `npm audit`
   finding; all were in development-only packages, and the published package had none.
+
+### Fixed
+
+- **The session deadline is dated from when Overleaf set the cookie.** Overleaf sets its session
+  cookie with `Max-Age`, which the cookie library counted from the cookie's latest use rather than
+  from its arrival, so `sessionExpiresAt` in `auth_status` and `keepalive` moved later with every
+  request and could report a deadline after the real one. The server now fixes the deadline when
+  the cookie arrives, and the jar file and both reports agree to the second.
 
 ### Documentation
 

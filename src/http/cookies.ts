@@ -75,8 +75,9 @@ function cookieToNetscape(cookie: Cookie): string {
   const includeSubdomains = cookie.hostOnly === false
   /*
    * Overleaf sets the session cookie with Max-Age, and tough-cookie keeps a Max-Age deadline in
-   * `maxAge` plus `creation`, leaving `expires` as 'Infinity'. Reading `expires` here wrote 0 and
-   * discarded the five-day deadline on every save. `expiryTime()` folds both forms together.
+   * `maxAge`, counted from `lastAccessed`, leaving `expires` as 'Infinity'. Reading `expires` here
+   * wrote 0 and discarded the five-day deadline on every save. `expiryTime()` folds both forms
+   * together; a cookie that came through `mergeSetCookies` already carries an absolute `expires`.
    */
   const expiryTime = cookie.expiryTime()
   const expires =
@@ -92,6 +93,21 @@ function cookieToNetscape(cookie: Cookie): string {
     cookie.key,
     cookie.value,
   ].join('\t')
+}
+
+/**
+ * RFC 6265 counts Max-Age from when the cookie arrives, but tough-cookie counts it from
+ * `lastAccessed`, which every `getCookies()` moves forward. Turning it into an absolute `expires`
+ * on arrival keeps the deadline the jar file records and the one `sessionExpiresAt` reports at the
+ * same instant, however often the cookie is read afterwards.
+ */
+function withArrivalDeadline(header: string, arrivedAt: number): Cookie | string {
+  const cookie = Cookie.parse(header)
+  if (cookie === undefined || typeof cookie.maxAge !== 'number' || cookie.maxAge <= 0) return header
+  // 8.64e15 ms is the latest instant a Date can hold; past it, serializing the jar would throw.
+  cookie.expires = new Date(Math.min(arrivedAt + cookie.maxAge * 1000, 8.64e15))
+  cookie.maxAge = null
+  return cookie
 }
 
 function serializeJar(jar: CookieJar): string {
@@ -170,7 +186,10 @@ export class CookieStore {
   }
 
   async mergeSetCookies(url: string, setCookies: string[]): Promise<void> {
-    for (const value of setCookies) await this.jar.setCookie(value, url)
+    const arrivedAt = Date.now()
+    for (const value of setCookies) {
+      await this.jar.setCookie(withArrivalDeadline(value, arrivedAt), url)
+    }
     if (setCookies.length === 0) return
 
     let release: (() => Promise<void>) | undefined
@@ -181,7 +200,9 @@ export class CookieStore {
       })
       // Reload under the lock so concurrent server processes do not overwrite each other's refreshes.
       const latest = await parseNetscapeCookies(await readFile(this.path, 'utf8'))
-      for (const value of setCookies) await latest.setCookie(value, url)
+      for (const value of setCookies) {
+        await latest.setCookie(withArrivalDeadline(value, arrivedAt), url)
+      }
       await this.jar.removeAllCookies()
       for (const cookie of latest.serializeSync()?.cookies ?? []) {
         const parsed = Cookie.fromJSON(cookie)
@@ -210,8 +231,8 @@ export class CookieStore {
    * or `undefined` when every one of them is a session cookie with no deadline.
    *
    * The session cookie is never matched by name: it is `overleaf_session2` on www.overleaf.com and
-   * `overleaf.sid` on Community Edition. `expiryTime()` rather than `expires`, because Overleaf
-   * sets the cookie with Max-Age and tough-cookie keeps that deadline apart from `expires`.
+   * `overleaf.sid` on Community Edition. `expiryTime()` rather than `expires`, because a Max-Age
+   * cookie that did not come through `mergeSetCookies` keeps its deadline apart from `expires`.
    */
   async sessionExpiresAt(url: string): Promise<string | undefined> {
     const deadlines = (await this.jar.getCookies(url))
