@@ -4,7 +4,7 @@ All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0.0, tool schemas and
 result shapes may change in a minor or patch release; each such change is listed below.
 
-## [0.6.1] - 2026-10-19
+## [0.6.1] - 2026-10-20
 
 A refreshed README and package description, and a session deadline that no longer drifts. No tool
 was added, removed, or changed in schema or result shape; the server still registers 31 tools.

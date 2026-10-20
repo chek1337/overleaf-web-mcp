@@ -75,8 +75,9 @@ function cookieToNetscape(cookie: Cookie): string {
   const includeSubdomains = cookie.hostOnly === false
   /*
    * Overleaf sets the session cookie with Max-Age, and tough-cookie keeps a Max-Age deadline in
-   * `maxAge` plus `creation`, leaving `expires` as 'Infinity'. Reading `expires` here wrote 0 and
-   * discarded the five-day deadline on every save. `expiryTime()` folds both forms together.
+   * `maxAge`, counted from `lastAccessed`, leaving `expires` as 'Infinity'. Reading `expires` here
+   * wrote 0 and discarded the five-day deadline on every save. `expiryTime()` folds both forms
+   * together; a cookie that came through `mergeSetCookies` already carries an absolute `expires`.
    */
   const expiryTime = cookie.expiryTime()
   const expires =
@@ -103,7 +104,8 @@ function cookieToNetscape(cookie: Cookie): string {
 function withArrivalDeadline(header: string, arrivedAt: number): Cookie | string {
   const cookie = Cookie.parse(header)
   if (cookie === undefined || typeof cookie.maxAge !== 'number' || cookie.maxAge <= 0) return header
-  cookie.expires = new Date(arrivedAt + cookie.maxAge * 1000)
+  // 8.64e15 ms is the latest instant a Date can hold; past it, serializing the jar would throw.
+  cookie.expires = new Date(Math.min(arrivedAt + cookie.maxAge * 1000, 8.64e15))
   cookie.maxAge = null
   return cookie
 }
@@ -229,8 +231,8 @@ export class CookieStore {
    * or `undefined` when every one of them is a session cookie with no deadline.
    *
    * The session cookie is never matched by name: it is `overleaf_session2` on www.overleaf.com and
-   * `overleaf.sid` on Community Edition. `expiryTime()` rather than `expires`, because Overleaf
-   * sets the cookie with Max-Age and tough-cookie keeps that deadline apart from `expires`.
+   * `overleaf.sid` on Community Edition. `expiryTime()` rather than `expires`, because a Max-Age
+   * cookie that did not come through `mergeSetCookies` keeps its deadline apart from `expires`.
    */
   async sessionExpiresAt(url: string): Promise<string | undefined> {
     const deadlines = (await this.jar.getCookies(url))

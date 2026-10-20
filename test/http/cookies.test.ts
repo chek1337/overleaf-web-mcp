@@ -163,6 +163,22 @@ describe('Netscape cookie jars', () => {
     }
   })
 
+  test('keeps a cookie whose Max-Age reaches past the latest date', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'overleaf-cookie-far-'))
+    const path = join(directory, 'cookies.txt')
+    await writeFile(path, '# Netscape HTTP Cookie File\n', { mode: 0o600 })
+    const store = await CookieStore.load(path)
+
+    await store.mergeSetCookies('https://www.overleaf.test/project', [
+      'overleaf_session2=far; Domain=.overleaf.test; Path=/; Secure; HttpOnly; Max-Age=99999999999999999999',
+    ])
+
+    expect(await store.sessionExpiresAt('https://www.overleaf.test/project')).toBe(
+      new Date(8.64e15).toISOString()
+    )
+    expect(await readFile(path, 'utf8')).toContain('\toverleaf_session2\tfar')
+  })
+
   test('reports the earliest finite deadline among the cookies a request would carry', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'overleaf-cookie-expiry-'))
     const path = join(directory, 'cookies.txt')
