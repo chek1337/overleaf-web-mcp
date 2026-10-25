@@ -4,6 +4,21 @@ All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Until 1.0.0, tool schemas and
 result shapes may change in a minor or patch release; each such change is listed below.
 
+## [Unreleased]
+
+### Fixed
+
+- **Compile outputs on per-user compiles.** Overleaf Community Edition and Server Pro compile per
+  user by default and serve outputs under `/project/<id>/user/<userId>/build/<buildId>/output/`.
+  The output tools requested `/project/<id>/build/<buildId>/output/` there and got a 404, so
+  `download_compile_output`, `get_compile_log`, and the compile output resources answered
+  `BUILD_NOT_FOUND` right after a successful build, and `summary.logRead` was never `true`.
+  `url` in the compile response is still never requested or returned: only the user ID is taken
+  from it, when every output file that names one names this project, its own build, and the same
+  user. The path gains `/user/<userId>` then and is unchanged otherwise, as on overleaf.com.
+  `buildRef` carries the user ID to a later process; an old `buildRef` without one still decodes,
+  and one whose user ID is not 24 hex digits is `INVALID_ARGUMENT`. Result shapes are unchanged.
+
 ## [0.6.2] - 2026-10-20
 
 Fixes from a live test run against overleaf.com. No tool was added or removed; the server still
